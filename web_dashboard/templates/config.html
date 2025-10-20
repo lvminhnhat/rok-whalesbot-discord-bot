@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+
+{% block page_title %}Configuration{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-server"></i> Allowed Guilds</h5>
+            </div>
+            <div class="card-body">
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control" id="guild-id-input" placeholder="Guild ID">
+                    <button class="btn btn-success" onclick="addGuild()">
+                        <i class="bi bi-plus"></i> Add
+                    </button>
+                </div>
+                <ul class="list-group" id="guild-list">
+                    <li class="list-group-item text-muted">Loading...</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-hash"></i> Allowed Channels</h5>
+            </div>
+            <div class="card-body">
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control" id="channel-id-input" placeholder="Channel ID">
+                    <button class="btn btn-success" onclick="addChannel()">
+                        <i class="bi bi-plus"></i> Add
+                    </button>
+                </div>
+                <ul class="list-group" id="channel-list">
+                    <li class="list-group-item text-muted">Loading...</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-clock"></i> Cooldown Setting</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Cooldown (seconds):</label>
+                    <input type="number" class="form-control" id="cooldown-input" min="0" value="60">
+                </div>
+                <button class="btn btn-primary" onclick="updateCooldown()">
+                    <i class="bi bi-save"></i> Save Cooldown
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let config = null;
+
+async function loadConfig() {
+    try {
+        const response = await fetch('/api/config');
+        config = await response.json();
+        
+        renderGuilds();
+        renderChannels();
+        
+        document.getElementById('cooldown-input').value = config.cooldown_seconds;
+    } catch (error) {
+        console.error('Error loading config:', error);
+        showToast('Error loading config: ' + error.message, 'danger');
+    }
+}
+
+function renderGuilds() {
+    const list = document.getElementById('guild-list');
+    list.innerHTML = '';
+    
+    if (config.allowed_guilds.length === 0) {
+        list.innerHTML = '<li class="list-group-item text-muted">No guilds configured (all allowed)</li>';
+        return;
+    }
+    
+    config.allowed_guilds.forEach(guildId => {
+        const item = document.createElement('li');
+        item.className = 'list-group-item d-flex justify-content-between align-items-center';
+        item.innerHTML = `
+            <code>${guildId}</code>
+            <button class="btn btn-sm btn-danger" onclick="removeGuild('${guildId}')">
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function renderChannels() {
+    const list = document.getElementById('channel-list');
+    list.innerHTML = '';
+    
+    if (config.allowed_channels.length === 0) {
+        list.innerHTML = '<li class="list-group-item text-muted">No channels configured (all allowed)</li>';
+        return;
+    }
+    
+    config.allowed_channels.forEach(channelId => {
+        const item = document.createElement('li');
+        item.className = 'list-group-item d-flex justify-content-between align-items-center';
+        item.innerHTML = `
+            <code>${channelId}</code>
+            <button class="btn btn-sm btn-danger" onclick="removeChannel('${channelId}')">
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+        list.appendChild(item);
+    });
+}
+
+async function addGuild() {
+    const guildId = document.getElementById('guild-id-input').value.trim();
+    if (!guildId) {
+        showToast('Please enter a guild ID', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/config/allowed_guilds', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'add', guild_id: guildId})
+        });
+        
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+        
+        if (result.success) {
+            document.getElementById('guild-id-input').value = '';
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function removeGuild(guildId) {
+    try {
+        const response = await fetch('/api/config/allowed_guilds', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'remove', guild_id: guildId})
+        });
+        
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+        
+        if (result.success) {
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function addChannel() {
+    const channelId = document.getElementById('channel-id-input').value.trim();
+    if (!channelId) {
+        showToast('Please enter a channel ID', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/config/allowed_channels', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'add', channel_id: channelId})
+        });
+        
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+        
+        if (result.success) {
+            document.getElementById('channel-id-input').value = '';
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function removeChannel(channelId) {
+    try {
+        const response = await fetch('/api/config/allowed_channels', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'remove', channel_id: channelId})
+        });
+        
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+        
+        if (result.success) {
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function updateCooldown() {
+    const seconds = parseInt(document.getElementById('cooldown-input').value);
+    
+    if (isNaN(seconds) || seconds < 0) {
+        showToast('Invalid cooldown value', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/config/cooldown', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({seconds})
+        });
+        
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'danger');
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+loadConfig();
+</script>
+{% endblock %}
+

@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block page_title %}Running Instances{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-play-circle"></i> Running Instances</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>User</th>
+                                <th>Discord ID</th>
+                                <th>Emulator Index</th>
+                                <th>Started At</th>
+                                <th>Uptime</th>
+                                <th>Last Heartbeat</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="instances-body">
+                            <tr>
+                                <td colspan="7" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadInstances() {
+    try {
+        const response = await fetch('/api/instances');
+        const data = await response.json();
+        
+        const tbody = document.getElementById('instances-body');
+        tbody.innerHTML = '';
+        
+        if (data.instances.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No instances running</td></tr>';
+            return;
+        }
+        
+        data.instances.forEach(instance => {
+            const row = document.createElement('tr');
+            
+            let uptimeText = '--';
+            if (instance.uptime_seconds) {
+                const hours = Math.floor(instance.uptime_seconds / 3600);
+                const minutes = Math.floor((instance.uptime_seconds % 3600) / 60);
+                uptimeText = `${hours}h ${minutes}m`;
+            }
+            
+            let startedText = '--';
+            if (instance.last_start) {
+                const startDate = new Date(instance.last_start);
+                startedText = startDate.toLocaleString();
+            }
+            
+            let heartbeatText = '--';
+            if (instance.last_heartbeat) {
+                const hbDate = new Date(instance.last_heartbeat);
+                heartbeatText = formatRelativeTime(hbDate);
+            }
+            
+            row.innerHTML = `
+                <td>${escapeHtml(instance.discord_name)}</td>
+                <td><code>${instance.discord_id}</code></td>
+                <td><span class="badge bg-secondary">#${instance.emulator_index}</span></td>
+                <td>${startedText}</td>
+                <td>${uptimeText}</td>
+                <td>${heartbeatText}</td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="stopInstance('${instance.discord_id}')">
+                        <i class="bi bi-stop-circle"></i> Stop
+                    </button>
+                </td>
+            `;
+            
+            tbody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Error loading instances:', error);
+        showToast('Error loading instances: ' + error.message, 'danger');
+    }
+}
+
+async function stopInstance(userId) {
+    if (!confirm('Are you sure you want to stop this instance?')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/instances/${userId}/stop`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showToast(result.message, 'success');
+            loadInstances();
+        } else {
+            showToast(result.message, 'danger');
+        }
+    } catch (error) {
+        showToast('Error stopping instance: ' + error.message, 'danger');
+    }
+}
+
+loadInstances();
+setupAutoRefresh(loadInstances, 5000); // 5 seconds
+</script>
+{% endblock %}
+

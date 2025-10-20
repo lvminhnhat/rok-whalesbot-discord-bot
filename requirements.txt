@@ -1,0 +1,11 @@
+# Existing dependencies
+pywinauto
+psutil
+
+# Discord Bot
+py-cord>=2.6.0
+python-dotenv>=1.0.0
+pytz>=2024.1
+
+# Web Dashboard
+Flask>=3.0.0

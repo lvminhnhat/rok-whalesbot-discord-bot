@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block page_title %}Audit Logs{% endblock %}
+
+{% block content %}
+<div class="row mb-3">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <label>Limit:</label>
+                        <select class="form-select" id="limit-select" onchange="loadLogs()">
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                    <div class="col-md-8">
+                        <label>Search User ID:</label>
+                        <input type="text" class="form-control" id="user-id-filter" placeholder="Leave empty for all users">
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-12">
+                        <button class="btn btn-primary" onclick="loadLogs()">
+                            <i class="bi bi-search"></i> Filter
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-journal-text"></i> Audit Logs</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>User</th>
+                                <th>Action</th>
+                                <th>Details</th>
+                                <th>Result</th>
+                                <th>Performed By</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-body">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="pagination-info" class="text-muted mt-2"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadLogs() {
+    const limit = document.getElementById('limit-select').value;
+    const userId = document.getElementById('user-id-filter').value.trim();
+    
+    let url = `/api/logs?limit=${limit}`;
+    if (userId) {
+        url += `&user_id=${userId}`;
+    }
+    
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        const tbody = document.getElementById('logs-body');
+        tbody.innerHTML = '';
+        
+        if (data.logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No logs found</td></tr>';
+            document.getElementById('pagination-info').textContent = '';
+            return;
+        }
+        
+        data.logs.forEach(log => {
+            const row = document.createElement('tr');
+            
+            const timestamp = new Date(log.timestamp).toLocaleString();
+            
+            const resultBadge = log.result === 'SUCCESS' 
+                ? '<span class="badge bg-success">Success</span>'
+                : '<span class="badge bg-danger">Failed</span>';
+            
+            const actionBadge = `<span class="badge bg-info">${log.action}</span>`;
+            
+            row.innerHTML = `
+                <td><small>${timestamp}</small></td>
+                <td>
+                    <small>${escapeHtml(log.user_name)}</small><br>
+                    <code style="font-size: 0.7em">${log.user_id}</code>
+                </td>
+                <td>${actionBadge}</td>
+                <td><small>${escapeHtml(log.details)}</small></td>
+                <td>${resultBadge}</td>
+                <td><small>${log.performed_by || '--'}</small></td>
+            `;
+            
+            tbody.appendChild(row);
+        });
+        
+        document.getElementById('pagination-info').textContent = 
+            `Showing ${data.logs.length} of ${data.total} logs`;
+        
+    } catch (error) {
+        console.error('Error loading logs:', error);
+        showToast('Error loading logs: ' + error.message, 'danger');
+    }
+}
+
+loadLogs();
+setupAutoRefresh(loadLogs, 15000); // 15 seconds
+</script>
+{% endblock %}
+

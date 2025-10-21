@@ -58,13 +58,24 @@ class DataManager:
             self._write_json(self.logs_file, {"logs": []})
     
     def _read_json(self, file_path: Path) -> Dict[str, Any]:
-        """Read JSON file safely."""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"Error reading {file_path}: {e}")
+        """Read JSON file safely with Unicode-aware fallbacks."""
+        if not file_path.exists():
             return {}
+
+        encodings = ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be")
+
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    return json.load(f)
+            except UnicodeDecodeError:
+                continue
+            except json.JSONDecodeError as exc:
+                print(f"Error parsing {file_path}: {exc}")
+                return {}
+
+        print(f"Error reading {file_path}: unsupported encoding")
+        return {}
     
     def _write_json(self, file_path: Path, data: Dict[str, Any]) -> None:
         """Write JSON file safely."""
@@ -343,4 +354,3 @@ class DataManager:
                 logs = [log for log in logs if log.get('user_id') == user_id]
             
             return len(logs)
-

@@ -108,7 +108,8 @@ class PermissionChecker:
             
             if time_passed < cooldown_seconds:
                 remaining = int(cooldown_seconds - time_passed)
-                return False, f"⏳ Vui lòng đợi {remaining} giây trước khi sử dụng lại."
+                return False, f"⏳ "
+                return False, f"⏳ Please wait for {remaining} more seconds before trying again."
         
         # Update cooldown
         self._cooldowns[user_id] = now

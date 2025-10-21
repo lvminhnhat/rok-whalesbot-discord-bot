@@ -9,17 +9,25 @@ echo [INFO] Starting WhaleBots system...
 echo.
 
 REM Get the directory where this batch file is located
-set SCRIPT_DIR=%~dp0
+set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
+
+REM Prefer the project virtual environment if it exists
+set "VENV_PY=%SCRIPT_DIR%.venv\Scripts\python.exe"
+if exist "%VENV_PY%" (
+    set "PYTHON_CMD=%VENV_PY%"
+) else (
+    set "PYTHON_CMD=python"
+)
 
 REM Start Discord Bot in a new window
 echo [1/2] Starting Discord Bot...
-start "WhaleBots Discord Bot" cmd /k "cd /d ""%SCRIPT_DIR%"" && python run_bot.py"
+start "WhaleBots Discord Bot" cmd /k "cd /d ""%SCRIPT_DIR%"" && ""%PYTHON_CMD%"" run_bot.py"
 timeout /t 2 /nobreak >nul
 
 REM Start Web Dashboard in a new window
 echo [2/2] Starting Web Dashboard...
-start "WhaleBots Web Dashboard" cmd /k "cd /d ""%SCRIPT_DIR%"" && python run_dashboard.py"
+start "WhaleBots Web Dashboard" cmd /k "cd /d ""%SCRIPT_DIR%"" && ""%PYTHON_CMD%"" run_dashboard.py"
 timeout /t 2 /nobreak >nul
 
 echo.

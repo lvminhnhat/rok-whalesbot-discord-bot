@@ -31,19 +31,20 @@ Complete management system for WhaleBots automation with Discord bot integration
 
 ## Quick Start
 
-### 1. Check System
+### 1. Prepare the environment
 ```bash
-check_system.bat
+python setup_system.py
 ```
+The setup script creates a `.venv` virtual environment, installs Python dependencies, and scaffolds required JSON files. It also copies `.env` from `env_example.txt` so you only need to fill in your secrets.
 
 ### 2. Configure
-Edit `.env`:
+Edit `.env` (created automatically on the previous step):
 ```env
 DISCORD_BOT_TOKEN=your_bot_token_here
 WHALEBOTS_PATH=C:\Users\DELL\Downloads\WhaleBots_1013
 ```
 
-Edit `data/config.json`:
+Edit `data/config.json` (all Unicode characters are supported, including Chinese, Korean, Japanese, etc.):
 ```json
 {
   "admin_users": ["YOUR_DISCORD_USER_ID"]
@@ -54,10 +55,9 @@ Edit `data/config.json`:
 ```bash
 run.bat
 ```
-
-This opens 2 windows:
-- **Discord Bot** - Handles Discord commands
-- **Web Dashboard** - http://127.0.0.1:5000
+`run.bat` automatically prefers the virtual environment if it exists and opens two windows:
+- **Discord Bot** – Handles Discord commands
+- **Web Dashboard** – http://127.0.0.1:5000
 
 ### 4. Test
 In Discord:

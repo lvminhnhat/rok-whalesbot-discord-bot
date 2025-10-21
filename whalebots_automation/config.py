@@ -6,11 +6,27 @@ type safety, and environment-specific settings.
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
-import logging
+from typing import Any, Dict, List, Optional, Union
+
+
+def _load_json_with_fallback(file_path: Union[str, Path]) -> Dict[str, Any]:
+    """Load JSON data supporting common UTF encodings."""
+    path = Path(file_path)
+    last_error: Optional[Exception] = None
+
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            with open(path, "r", encoding=encoding) as file_obj:
+                return json.load(file_obj)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+
+    raise ValueError(f"Could not decode configuration file: {path}") from last_error
 
 
 @dataclass
@@ -227,17 +243,15 @@ class WhaleBotsConfiguration:
             json.JSONDecodeError: If config file is invalid JSON
             ValueError: If configuration values are invalid
         """
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
+        path = Path(config_path)
 
-            return cls.from_dict(config_data)
-
-        except FileNotFoundError:
-            # Create default config file if it doesn't exist
+        if not path.exists():
             default_config = cls()
             default_config.save_to_file(config_path)
             return default_config
+
+        config_data = _load_json_with_fallback(path)
+        return cls.from_dict(config_data)
 
     @classmethod
     def from_dict(cls, config_data: Dict[str, Any]) -> "WhaleBotsConfiguration":

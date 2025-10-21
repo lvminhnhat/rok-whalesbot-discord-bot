@@ -9,15 +9,17 @@ Make sure you have:
 - ✅ Discord Bot Token from Discord Developer Portal
 - ✅ WhaleBots.exe running
 
-### 2. Install Dependencies
+### 2. Run automated setup
 
 ```bash
-pip install -r requirements.txt
+python setup_system.py
 ```
+
+This command creates the `.venv` virtual environment, installs the Python dependencies, and scaffolds all required JSON files using UTF-8 so multilingual text (Chinese, Korean, Japanese, etc.) is preserved.
 
 ### 3. Configure Environment
 
-Edit `.env` file and add your Discord Bot Token:
+Edit the generated `.env` file and add your Discord Bot Token:
 
 ```env
 DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN_HERE
@@ -38,6 +40,8 @@ Edit `data/config.json`:
 }
 ```
 
+Notes: the JSON files are saved with UTF-8 encoding, so you can safely store names or labels in any language (Chinese, Korean, Japanese, etc.).
+
 **How to get your Discord User ID:**
 1. Discord Settings → Advanced → Enable "Developer Mode"
 2. Right-click your name → Copy ID
@@ -49,20 +53,30 @@ Edit `data/config.json`:
 run.bat
 ```
 
+The batch script automatically uses the `.venv` interpreter if it exists.
+
 This will open 2 windows:
 - Discord Bot window
 - Web Dashboard window
 
 **Option B: Run separately**
 
-Terminal 1 - Discord Bot:
+Terminal 1 - Discord Bot (Windows):
 ```bash
-python run_bot.py
+.\.venv\Scripts\python.exe run_bot.py
+```
+Terminal 1 - Discord Bot (macOS/Linux):
+```bash
+./.venv/bin/python run_bot.py
 ```
 
-Terminal 2 - Web Dashboard:
+Terminal 2 - Web Dashboard (Windows):
 ```bash
-python run_dashboard.py
+.\.venv\Scripts\python.exe run_dashboard.py
+```
+Terminal 2 - Web Dashboard (macOS/Linux):
+```bash
+./.venv/bin/python run_dashboard.py
 ```
 
 ### 6. Access

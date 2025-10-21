@@ -56,12 +56,24 @@ class BotService:
                 'message': "You don't have access. Please contact admin."
             }
         
-        # Check if user is linked to an emulator
-        if not user.emulator_name or user.emulator_index == -1:
+        # Check if user is linked to an emulator (by index)
+        if user.emulator_index == -1:
             return {
                 'success': False,
                 'message': 'You are not linked to any emulator. Please use /link <emulator_name> to link first.\nUse /list_emulators to see available emulators.'
             }
+
+        # Attempt to backfill emulator name if missing (non-blocking)
+        if not user.emulator_name:
+            try:
+                for state in self.whalesbot.get_emulator_states():
+                    if state.index == user.emulator_index:
+                        user.emulator_name = state.emulator_info.name
+                        self.data_manager.save_user(user)
+                        break
+            except Exception:
+                # Ignore errors here; starting by index may still work
+                pass
         
         # Check subscription
         if user.subscription.is_expired:

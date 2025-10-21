@@ -29,12 +29,12 @@ try:
     from ..logger import get_logger, log_performance
 except ImportError:
     # Fallback for running tests directly
-    from config import UIConfiguration
-    from exceptions import (
+    from whalebots_automation.config import UIConfiguration
+    from whalebots_automation.exceptions import (
         WindowError, WindowNotFoundError, UICoordinateError,
         DependencyError, TimeoutError, SecurityError
     )
-    from logger import get_logger, log_performance
+    from whalebots_automation.logger import get_logger, log_performance
 
 
 @dataclass
@@ -245,7 +245,10 @@ class HybridClickHandler(IClickHandler):
 
     def _try_message_click(self, hwnd: int, x: int, y: int) -> bool:
         """
-        Try message-based clicking.
+        Try message-based clicking with SendMessage.
+
+        NOTE: Message-based clicks often DON'T WORK for emulator/game windows.
+        Can be controlled via config.use_message_based_click.
 
         Args:
             hwnd: Window handle
@@ -255,53 +258,76 @@ class HybridClickHandler(IClickHandler):
         Returns:
             True if successful, False otherwise
         """
+        # Check config to see if message-based click should be used
+        if not self.config.use_message_based_click or self.config.force_physical_mouse:
+            self.logger.debug(f"Message-based click disabled by config (force_physical_mouse={self.config.force_physical_mouse})")
+            return False
+        
+        # Try SendMessage (for Windows applications like WhaleBots control panel)
         try:
-            # Create lParam with coordinates
             lparam = win32api.MAKELONG(x, y)
-
-            # Send mouse down and up messages
-            win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
+            win32api.SendMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
             time.sleep(self.config.click_delay)
-            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
-
+            win32api.SendMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
+            self.logger.debug(f"SendMessage click attempted at ({x}, {y})")
             return True
-
         except Exception as e:
-            self.logger.debug(f"Message-based click failed: {e}")
+            self.logger.debug(f"SendMessage click failed: {e}")
             return False
 
     def _try_mouse_click(self, hwnd: int, x: int, y: int) -> bool:
         """
-        Try mouse-based clicking.
+        Try mouse-based clicking using physical mouse events.
+        This is the most reliable method for emulator/game windows.
 
         Args:
             hwnd: Window handle
-            x: X coordinate
-            y: Y coordinate
+            x: X coordinate (client-relative)
+            y: Y coordinate (client-relative)
 
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Bring window to front
+            # Bring window to front and ensure it's active
             self._bring_to_front(hwnd)
+            time.sleep(0.15)  # Wait for window to come to front (increased delay)
+
+            # Verify window is in foreground (critical for emulators)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    foreground = win32gui.GetForegroundWindow()
+                    if foreground == hwnd:
+                        break
+                    
+                    self.logger.debug(f"Window not in foreground (attempt {attempt+1}/{max_retries}), retrying...")
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.1)
+                except Exception as e:
+                    self.logger.debug(f"SetForegroundWindow failed: {e}")
+                    if attempt == max_retries - 1:
+                        self.logger.warning(f"Could not bring window to foreground, continuing anyway...")
 
             # Convert client coordinates to screen coordinates
             sx, sy = win32gui.ClientToScreen(hwnd, (x, y))
+            
+            self.logger.debug(f"Client coords: ({x}, {y}) -> Screen coords: ({sx}, {sy})")
 
             # Set cursor position
             win32api.SetCursorPos((sx, sy))
             time.sleep(self.config.click_delay)
 
-            # Perform click
+            # Perform click with physical mouse events
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(self.config.click_delay)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
+            self.logger.debug(f"Mouse click completed at screen ({sx}, {sy})")
             return True
 
         except Exception as e:
-            self.logger.debug(f"Mouse-based click failed: {e}")
+            self.logger.error(f"Mouse-based click failed: {e}")
             return False
 
     @staticmethod
@@ -328,6 +354,47 @@ class HybridClickHandler(IClickHandler):
 
 
 class MouseScrollHandler(IScrollHandler):
+    def _send_scroll_direct(self, hwnd: int, x: int, y: int, amount: int) -> bool:
+        """Send scroll directly using SendInput."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+
+
+
+            class MOUSEINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG))
+                ]
+
+            class INPUT(ctypes.Structure):
+                class _INPUT(ctypes.Union):
+                    _fields_ = [("mi", MOUSEINPUT)]
+                _anonymous_ = ("_input",)
+                _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
+
+            INPUT_MOUSE = 0
+            MOUSEEVENTF_WHEEL = 0x0800
+
+            scroll_input = INPUT(
+                type=INPUT_MOUSE,
+                _input=INPUT._INPUT(mi=MOUSEINPUT(
+                    dx=0, dy=0, mouseData=amount,
+                    dwFlags=MOUSEEVENTF_WHEEL,
+                    time=0, dwExtraInfo=None
+                ))
+            )
+
+            size = ctypes.sizeof(INPUT)
+            result = ctypes.windll.user32.SendInput(1, ctypes.byref(scroll_input), size)
+            return result == 1
+        except:
+            return False
+
+
     """Scroll handler using mouse wheel events."""
 
     def __init__(self, config: UIConfiguration, security_config=None):
@@ -399,34 +466,64 @@ class MouseScrollHandler(IScrollHandler):
         self.logger.debug(f"Scrolling at ({x}, {y}): up={up}, down={down}")
 
         try:
-            # Bring window to front
+            # Bring window to front and ensure it's active
             self._bring_to_front(hwnd)
+            time.sleep(0.05)
+
+            # Verify window is in foreground
+            try:
+                foreground = win32gui.GetForegroundWindow()
+                if foreground != hwnd:
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.05)
+            except:
+                pass
 
             # Convert client coordinates to screen coordinates
             sx, sy = win32gui.ClientToScreen(hwnd, (x, y))
 
-            # Set cursor position
-            win32api.SetCursorPos((sx, sy))
-            time.sleep(self.config.scroll_delay)
+            # Try to set cursor position (with fallback)
+            cursor_moved = False
+            try:
+                win32api.SetCursorPos((sx, sy))
+                time.sleep(self.config.scroll_delay)
+                cursor_moved = True
+            except:
+                # If cursor move fails, try direct scroll at window center
+                self.logger.debug(f"Failed to move cursor, using direct scroll")
 
             # Perform scroll-up operations
             for i in range(up):
-                win32api.mouse_event(
-                    win32con.MOUSEEVENTF_WHEEL,
-                    0, 0,
-                    self.config.scroll_wheel_amount,
-                    0
-                )
+                if cursor_moved:
+                    win32api.mouse_event(
+                        win32con.MOUSEEVENTF_WHEEL,
+                        0, 0,
+                        self.config.scroll_wheel_amount,
+                        0
+                    )
+                else:
+                    # Use SendMessage as fallback
+                    lparam = win32api.MAKELONG(x, y)
+                    win32api.SendMessage(hwnd, win32con.WM_MOUSEWHEEL, 
+                                       win32api.MAKELONG(0, self.config.scroll_wheel_amount), 
+                                       lparam)
                 time.sleep(self.config.scroll_delay)
 
             # Perform scroll-down operations
             for i in range(down):
-                win32api.mouse_event(
-                    win32con.MOUSEEVENTF_WHEEL,
-                    0, 0,
-                    -self.config.scroll_wheel_amount,
-                    0
-                )
+                if cursor_moved:
+                    win32api.mouse_event(
+                        win32con.MOUSEEVENTF_WHEEL,
+                        0, 0,
+                        -self.config.scroll_wheel_amount,
+                        0
+                    )
+                else:
+                    # Use SendMessage as fallback
+                    lparam = win32api.MAKELONG(x, y)
+                    win32api.SendMessage(hwnd, win32con.WM_MOUSEWHEEL, 
+                                       win32api.MAKELONG(0, -self.config.scroll_wheel_amount), 
+                                       lparam)
                 time.sleep(self.config.scroll_delay)
 
             self.logger.debug(f"Scrolling completed: up={up}, down={down}")
@@ -533,6 +630,13 @@ class WindowController:
                     )
 
                 self.hwnd = matches[index]
+                
+                # Restore window if minimized
+                if win32gui.IsIconic(self.hwnd):
+                    self.logger.info(f"Window is minimized, restoring...")
+                    win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+                    time.sleep(0.3)  # Wait for window to restore
+                
                 self.logger.info(f"Attached to window {hex(self.hwnd)} (index: {index})")
                 return self.hwnd
 
@@ -683,9 +787,19 @@ class WindowController:
 
         # Enable DPI awareness for better coordinate handling
         try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+            # Try modern DPI awareness API first (Windows 10 1703+)
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        except:
+            try:
+                # Fallback to Windows 8.1+ API
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            except:
+                try:
+                    # Final fallback to old API
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except:
+                    pass
 
         return WindowController(
             finder=RegexWindowFinder(config),

@@ -4,6 +4,127 @@ Window controller module for WhaleBots automation platform.
 This module provides a SOLID-designed window automation system with proper
 error handling, logging, and security validation for UI operations.
 """
+# === Lenient JSON utilities (auto-injected) ==================================
+# Purpose: allow reading large/irregular JSON files WITHOUT modifying the files.
+# - Handles UTF-8 BOM
+# - Strips // line comments and /* block comments */
+# - Removes trailing commas before "]" or "}"
+# - Falls back to JSON Lines (one JSON per line) if standard parse still fails
+# Usage:
+#   data = load_json_lenient("/path/to/file.json")
+#   subset = select_keys(data, {"emuInfo": {"name", "deviceId", "vmName"}})
+#
+# Injected on: 2025-10-21T16:49:25.857689
+
+import re as _re_json_utils
+import json as _json_json_utils
+from pathlib import Path as _Path_json_utils
+from typing import Any as _Any_json_utils, Mapping as _Mapping_json_utils
+
+def _strip_bom(s: str) -> str:
+    return s.lstrip("\ufeff")
+
+def _strip_comments(s: str) -> str:
+    res = []
+    i, n = 0, len(s)
+    in_str = False
+    str_ch = ''
+    in_line_comment = False
+    in_block_comment = False
+    while i < n:
+        ch = s[i]
+        nxt = s[i+1] if i+1 < n else ''
+        if in_line_comment:
+            if ch == '\n':
+                in_line_comment = False
+                res.append(ch)
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == '*' and nxt == '/':
+                in_block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if in_str:
+            res.append(ch)
+            if ch == '\\':
+                if i+1 < n:
+                    res.append(s[i+1])
+                    i += 2
+                    continue
+            elif ch == str_ch:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            str_ch = ch
+            res.append(ch)
+            i += 1
+            continue
+        if ch == '/' and nxt == '/':
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == '/' and nxt == '*':
+            in_block_comment = True
+            i += 2
+            continue
+        res.append(ch)
+        i += 1
+    return ''.join(res)
+
+def _strip_trailing_commas(s: str) -> str:
+    return _re_json_utils.sub(r',\s*([}\]])', r'\1', s)
+
+def _try_json_lines(text: str):
+    arr = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            arr.append(_json_json_utils.loads(ln))
+        except Exception:
+            return None
+    return arr
+
+def load_json_lenient(path: str | _Path_json_utils) -> _Any_json_utils:
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        raw = f.read()
+    text = _strip_bom(raw)
+    cleaned = _strip_trailing_commas(_strip_comments(text))
+    try:
+        return _json_json_utils.loads(cleaned)
+    except Exception:
+        jl = _try_json_lines(text)
+        if jl is not None:
+            return jl
+        return _json_json_utils.loads(cleaned)  # will raise
+
+def select_keys(data: _Any_json_utils, schema: _Mapping_json_utils[str, _Any_json_utils] | None) -> _Any_json_utils:
+    if schema is None:
+        return data
+    if isinstance(data, list):
+        return [select_keys(x, schema) for x in data]
+    if isinstance(data, dict):
+        out = {}
+        if isinstance(schema, set):
+            for k in schema:
+                if k in data:
+                    out[k] = data[k]
+            return out
+        if isinstance(schema, dict):
+            for k, sub in schema.items():
+                if k in data:
+                    out[k] = select_keys(data[k], sub)
+            return out
+    return data
+
+# =============================================================================
+
 
 import re
 import time
@@ -359,6 +480,9 @@ class MouseScrollHandler(IScrollHandler):
         try:
             import ctypes
             from ctypes import wintypes
+
+
+
 
             class MOUSEINPUT(ctypes.Structure):
                 _fields_ = [

@@ -142,12 +142,12 @@ Access: http://127.0.0.1:5000
 ## Dependencies
 
 ```
-py-cord>=2.6.0
-Flask>=3.0.0
-python-dotenv>=1.0.0
+py-cord>=2.6.0,<3.0
+Flask>=3.0.0,<4.0
+python-dotenv>=1.0.0,<2.0
 pytz>=2024.1
-pywinauto
-psutil
+psutil>=5.9,<7
+pywin32 (Windows only)
 ```
 
 Install:

@@ -110,6 +110,12 @@ def setup_user_commands(
     )
     async def status(ctx: discord.ApplicationContext):
         """Check user's bot status."""
+        # Check if in allowed location
+        allowed, error_msg = in_allowed_channel(ctx)
+        if not allowed:
+            await ctx.respond(error_msg, ephemeral=True)
+            return
+
         user_id = str(ctx.author.id)
         
         status_info = bot_service.get_status(user_id)
@@ -178,6 +184,12 @@ def setup_user_commands(
     )
     async def expiry(ctx: discord.ApplicationContext):
         """Check user's subscription expiry."""
+        # Check if in allowed location
+        allowed, error_msg = in_allowed_channel(ctx)
+        if not allowed:
+            await ctx.respond(error_msg, ephemeral=True)
+            return
+
         user_id = str(ctx.author.id)
         user = data_manager.get_user(user_id)
         

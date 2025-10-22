@@ -8,6 +8,7 @@ optimizations.
 
 import json
 import os
+import re  # Added for regex fallback
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Tuple
@@ -321,12 +322,30 @@ class EmulatorStateManager:
                 self.logger.log_operation_end(operation_id, success=True)
                 return []
 
-            # Fix the truncated part in memory without editing the file
-            # Assume truncated is in first object, replace with closing fields and start of next list if needed
-            content = content.replace("(truncated 192399 characters)", '], "listHero":[ ], "loginTab":{"id":0,"name":"","player":0,"server":0,"type":0}, "m_lstExpeditonData":[ ], "listItem": [ {"id":73,"name":"Tăng tốc huấn luyện" ' )
-
-            # Parse the content as a JSON array
-            accounts = json.loads(content)
+            try:
+                # Try full JSON parse first
+                accounts = json.loads(content)
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"JSON parse failed: {e}. Falling back to regex extraction for emulator names.")
+                # Fallback: Use regex to extract only emulator names from emuInfo blocks
+                # Pattern: Find "emuInfo":{... "name":"value" ...
+                pattern = r'"emuInfo":\{.*?"name":"(.*?)"'
+                names = re.findall(pattern, content, re.DOTALL)
+                accounts = []
+                for index, name in enumerate(names):
+                    # Create minimal account dict with only emuInfo name (since that's all we need)
+                    accounts.append({
+                        'emuInfo': {
+                            'name': name,
+                            'deviceId': '',  # Default empty for other fields
+                            'vmName': '',
+                            'executablePath': '',
+                            'workingDirectory': '',
+                            'commandLine': '',
+                            'type': 0
+                        }
+                    })
+                self.logger.info(f"Extracted {len(accounts)} emulator names via fallback.")
 
             if not isinstance(accounts, list):
                 raise ValidationError("Accounts file must contain an array")
@@ -334,11 +353,6 @@ class EmulatorStateManager:
             self.logger.debug(f"Read {len(accounts)} accounts from Accounts.json")
             self.logger.log_operation_end(operation_id, success=True)
             return accounts
-
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Invalid JSON in accounts file: {e}")
-            self.logger.log_operation_end(operation_id, success=False)
-            return []
 
         except Exception as e:
             self.logger.log_operation_end(operation_id, success=False)
@@ -387,7 +401,7 @@ class EmulatorStateManager:
                 emulator_info_data = account.get('emuInfo', {})
                 state_value = last_state[i] if i < len(last_state) else 0
 
-                # Create EmulatorInfo object
+                # Create EmulatorInfo object (with defaults if fields missing)
                 emulator_info = EmulatorInfo(
                     name=emulator_info_data.get('name', f'Emulator_{i}'),
                     device_id=emulator_info_data.get('deviceId', ''),
@@ -398,23 +412,14 @@ class EmulatorStateManager:
                     emulator_type=emulator_info_data.get('type', 0)
                 )
 
-                # Extract only essential game_info: active activities summary
-                game_info = account.get('gameInfo', {})
-                activities = game_info.get('activityTab', {}).get('activities', [])
-                active_activities = [act for act in activities if act.get('check', False)]
-
-                essential_game_info = {
-                    'activeActivities': [{'id': act['id'], 'group': act['group'], 'config': act.get('config', {})} for act in active_activities]  # Summary, ignore large configs if not needed
-                }
-
-                # Create EmulatorState with essential data
+                # Create EmulatorState object
                 emulator_state = EmulatorState(
                     index=i,
                     state=state_value,
                     emulator_info=emulator_info,
-                    game_info=essential_game_info,  # Only essential
+                    game_info=account.get('gameInfo', {}),
                     common_info=account.get('commonInfo', {}),
-                    full_account_data={}  # Empty to save memory, if not needed
+                    full_account_data=account
                 )
 
                 # Validate the state

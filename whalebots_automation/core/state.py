@@ -326,26 +326,48 @@ class EmulatorStateManager:
                 # Try full JSON parse first
                 accounts = json.loads(content)
             except json.JSONDecodeError as e:
-                self.logger.warning(f"JSON parse failed: {e}. Falling back to regex extraction for emulator names.")
-                # Fallback: Use regex to extract only emulator names from emuInfo blocks
-                # Pattern: Find "emuInfo":{... "name":"value" ...
-                pattern = r'"emuInfo":\{.*?"name":"(.*?)"'
-                names = re.findall(pattern, content, re.DOTALL)
-                accounts = []
-                for index, name in enumerate(names):
-                    # Create minimal account dict with only emuInfo name (since that's all we need)
-                    accounts.append({
-                        'emuInfo': {
-                            'name': name,
-                            'deviceId': '',  # Default empty for other fields
-                            'vmName': '',
-                            'executablePath': '',
-                            'workingDirectory': '',
-                            'commandLine': '',
-                            'type': 0
-                        }
-                    })
-                self.logger.info(f"Extracted {len(accounts)} emulator names via fallback.")
+                self.logger.warning(f"JSON parse failed: {e}. Trying to clean and parse again...")
+                
+                try:
+                    # Try cleaning invalid control characters
+                    cleaned_content = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]', '', content)
+                    accounts = json.loads(cleaned_content)
+                    self.logger.info(f"Successfully parsed after cleaning. Found {len(accounts)} accounts.")
+                except json.JSONDecodeError as e2:
+                    self.logger.warning(f"Cleaned parse also failed: {e2}. Falling back to regex extraction.")
+                    
+                    # Fallback: Use regex to extract all emuInfo fields
+                    pattern = r'"emuInfo"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]*)"[^}]*\}'
+                    matches = re.finditer(pattern, content)
+                    accounts = []
+                    
+                    for i, match in enumerate(matches):
+                        full_block = match.group(0)
+                        
+                        # Extract all fields with regex
+                        name_match = re.search(r'"name"\s*:\s*"([^"]*)"', full_block)
+                        device_id_match = re.search(r'"deviceId"\s*:\s*"([^"]*)"', full_block)
+                        vm_name_match = re.search(r'"vmName"\s*:\s*"([^"]*)"', full_block)
+                        exec_path_match = re.search(r'"executablePath"\s*:\s*"([^"]*)"', full_block)
+                        work_dir_match = re.search(r'"workingDirectory"\s*:\s*"([^"]*)"', full_block)
+                        cmd_line_match = re.search(r'"commandLine"\s*:\s*"([^"]*)"', full_block)
+                        type_match = re.search(r'"type"\s*:\s*(\d+)', full_block)
+                        
+                        accounts.append({
+                            'emuInfo': {
+                                'name': name_match.group(1) if name_match else f'Emulator_{i}',
+                                'deviceId': device_id_match.group(1) if device_id_match else '',
+                                'vmName': vm_name_match.group(1) if vm_name_match else '',
+                                'executablePath': exec_path_match.group(1) if exec_path_match else '',
+                                'workingDirectory': work_dir_match.group(1) if work_dir_match else '',
+                                'commandLine': cmd_line_match.group(1) if cmd_line_match else '',
+                                'type': int(type_match.group(1)) if type_match else 0
+                            },
+                            'gameInfo': {},
+                            'commonInfo': {}
+                        })
+                    
+                    self.logger.info(f"Extracted {len(accounts)} accounts via regex fallback.")
 
             if not isinstance(accounts, list):
                 raise ValidationError("Accounts file must contain an array")

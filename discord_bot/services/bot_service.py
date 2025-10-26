@@ -3,6 +3,7 @@ Bot service for managing WhaleBots instances.
 """
 
 import os
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 import pytz
@@ -15,22 +16,26 @@ from whalebots_automation.exceptions import (
 from shared.models import User, Subscription
 from shared.constants import InstanceStatus
 from shared.data_manager import DataManager
+from .ui_operation_queue import UIOperationQueue, OperationType, Priority, OperationStatus
 
 
 class BotService:
     """Service for managing bot instances via WhaleBots automation."""
     
-    def __init__(self, whalebots_path: str, data_manager: DataManager):
+    def __init__(self, whalebots_path: str, data_manager: DataManager, operation_queue: Optional[UIOperationQueue] = None):
         """
         Initialize bot service.
-        
+
         Args:
             whalebots_path: Path to WhaleBots installation
             data_manager: Data manager instance
+            operation_queue: Optional UI operation queue instance
         """
         self.whalebots_path = whalebots_path
         self.data_manager = data_manager
         self._whalesbot: Optional[WhaleBots] = None
+        self.operation_queue = operation_queue
+        self.use_queue = operation_queue is not None
     
     @property
     def whalesbot(self) -> WhaleBots:
@@ -67,7 +72,7 @@ class BotService:
             # Return False on error to be safe - we don't want to start a bot that might already be running
             return False
     
-    def start_instance(self, user_id: str) -> Dict[str, Any]:
+    async def start_instance(self, user_id: str) -> Dict[str, Any]:
         """
         Start bot instance for user.
 
@@ -109,6 +114,10 @@ class BotService:
                 'success': False,
                 'message': f'Your subscription expired on {user.subscription.end_at}. Please renew.'
             }
+
+        # If queue is available, use queued execution
+        if self.use_queue and self.operation_queue:
+            return await self._queued_start_instance(user)
 
         # Check actual emulator state before proceeding
         try:
@@ -163,7 +172,7 @@ class BotService:
             
             return {
                 'success': True,
-                'message': f'Miner started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days'
+                'message': 'Miner started succesfully!\nPls wait 45 seconds for the Miner to run.\nDo not send any more orders for about 2 minutes.\nTime left: ...'
             }
             
         except EmulatorAlreadyRunningError:
@@ -191,7 +200,7 @@ class BotService:
                 'message': f'Unknown error: {str(e)}'
             }
     
-    def stop_instance(self, user_id: str) -> Dict[str, Any]:
+    async def stop_instance(self, user_id: str) -> Dict[str, Any]:
         """
         Stop bot instance for user.
 
@@ -207,6 +216,10 @@ class BotService:
                 'success': False,
                 'message': "You don't have access."
             }
+
+        # If queue is available, use queued execution
+        if self.use_queue and self.operation_queue:
+            return await self._queued_stop_instance(user)
 
         # Check actual emulator state before proceeding
         try:
@@ -264,7 +277,7 @@ class BotService:
             
             return {
                 'success': True,
-                'message': f'Miner stopped successfully!{uptime_text}'
+                'message': 'Miner is sending stop command, please wait 1 minute then login, thank you!'
             }
             
         except EmulatorNotRunningError:
@@ -334,24 +347,27 @@ class BotService:
                 state_synced = True
                 sync_message = " (State auto-synchronized: was started outside Discord)"
 
-        # Build status message (text-only, no emojis)
-        status_symbols = {
-            InstanceStatus.RUNNING.value: '[RUNNING]',
-            InstanceStatus.STOPPED.value: '[STOPPED]',
-            InstanceStatus.EXPIRED.value: '[EXPIRED]',
-            InstanceStatus.ERROR.value: '[ERROR]'
-        }
-
+        # Build status message - convert to running/stopped text
         status = user.status
         if user.subscription.is_expired:
             status = InstanceStatus.EXPIRED.value
 
-        symbol = status_symbols.get(status, '[UNKNOWN]')
+        # Map status to running/stopped text
+        if status == InstanceStatus.RUNNING.value:
+            status_text = 'Miner is running'
+        elif status == InstanceStatus.STOPPED.value:
+            status_text = 'Miner is stopped'
+        elif status == InstanceStatus.EXPIRED.value:
+            status_text = 'Miner is stopped'
+        elif status == InstanceStatus.ERROR.value:
+            status_text = 'Miner is stopped'
+        else:
+            status_text = 'Miner is stopped'
 
         info = {
             'exists': True,
-            'status': status,
-            'symbol': symbol,
+            'status': status_text,
+            'symbol': '',
             'emulator_index': user.emulator_index,
             'is_running': user.is_running,
             'uptime_seconds': user.uptime_seconds,
@@ -641,3 +657,236 @@ class BotService:
         if self._whalesbot:
             self._whalesbot.cleanup()
             self._whalesbot = None
+
+    async def _queued_start_instance(self, user: User) -> Dict[str, Any]:
+        """
+        Start instance using queue system.
+
+        Args:
+            user: User object
+
+        Returns:
+            Result dictionary with success status and message
+        """
+        # Check if user already has pending operations
+        pending_ops = self.operation_queue.get_pending_operations()
+        user_pending = [op for op in pending_ops if op['user_name'] == user.discord_name]
+
+        if user_pending:
+            return {
+                'success': False,
+                'message': f'You already have a pending operation in the queue (position #{user_pending[0]["queue_position"]}).'
+            }
+
+        # Create start operation callback
+        async def start_operation():
+            # Check actual emulator state before proceeding
+            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+
+            # Check for state inconsistency
+            if user.is_running and not actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing...")
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'State inconsistency detected. Status synchronized. Please try again.'
+                }
+
+            # Check if already running
+            if user.is_running and actual_emulator_state:
+                return {
+                    'success': False,
+                    'message': 'Your miner is already running.'
+                }
+
+            # Check if emulator was started outside Discord
+            if not user.is_running and actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says STOPPED but emulator is RUNNING. Syncing...")
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'State inconsistency detected. Your miner was started outside Discord. Status synchronized.'
+                }
+
+            # Execute start operation
+            try:
+                self.whalesbot.start(user.emulator_index)
+
+                # Update user status
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+
+                return {
+                    'success': True,
+                    'message': 'Miner started succesfully!\nPls wait 45 seconds for the Miner to run.\nDo not send any more orders for about 2 minutes.\nTime left: ...'
+                }
+
+            except EmulatorAlreadyRunningError:
+                # Update status to running anyway
+                user.status = InstanceStatus.RUNNING.value
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Emulator is already running.'
+                }
+
+            except (EmulatorNotFoundError, WindowError) as e:
+                user.status = InstanceStatus.ERROR.value
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': f'Error starting: {str(e)}'
+                }
+
+        # Add operation to queue
+        operation_id = await self.operation_queue.add_operation(
+            operation_type=OperationType.START,
+            user_id=user.discord_id,
+            user_name=user.discord_name,
+            emulator_index=user.emulator_index,
+            priority=Priority.NORMAL,
+            timeout=60,
+            callback=start_operation,
+            metadata={'emulator_name': user.emulator_name}
+        )
+
+        # Wait for operation to complete
+        result = await self.operation_queue.wait_for_operation(operation_id, timeout=120)
+
+        if result is None:
+            return {
+                'success': False,
+                'message': 'Operation timed out. Please try again or contact admin.'
+            }
+
+        if result.status == OperationStatus.COMPLETED:
+            return result.result or {'success': False, 'message': 'Unknown error'}
+        else:
+            return {
+                'success': False,
+                'message': f'Operation failed: {result.error or "Unknown error"}'
+            }
+
+    async def _queued_stop_instance(self, user: User) -> Dict[str, Any]:
+        """
+        Stop instance using queue system.
+
+        Args:
+            user: User object
+
+        Returns:
+            Result dictionary with success status and message
+        """
+        # Check if user already has pending operations
+        pending_ops = self.operation_queue.get_pending_operations()
+        user_pending = [op for op in pending_ops if op['user_name'] == user.discord_name]
+
+        if user_pending:
+            return {
+                'success': False,
+                'message': f'You already have a pending operation in the queue (position #{user_pending[0]["queue_position"]}).'
+            }
+
+        # Create stop operation callback
+        async def stop_operation():
+            # Check actual emulator state before proceeding
+            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+
+            # Check for state inconsistency
+            if user.is_running and not actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED during stop. Syncing...")
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Your miner is already stopped (state synchronized).'
+                }
+
+            # Check if database says stopped but emulator is actually running
+            if not user.is_running and actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says STOPPED but emulator is RUNNING during stop. Syncing...")
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+
+            # Check if not running after potential sync
+            if not user.is_running and not actual_emulator_state:
+                return {
+                    'success': False,
+                    'message': 'Your miner is not running.'
+                }
+
+            # Execute stop operation
+            try:
+                self.whalesbot.stop(user.emulator_index)
+
+                # Update user status
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+
+                uptime_text = ""
+                if user.uptime_seconds:
+                    hours = user.uptime_seconds // 3600
+                    minutes = (user.uptime_seconds % 3600) // 60
+                    uptime_text = f"\nUptime: {hours}h {minutes}m"
+
+                return {
+                    'success': True,
+                    'message': 'Miner is sending stop command, please wait 1 minute then login, thank you!'
+                }
+
+            except EmulatorNotRunningError:
+                # Update status to stopped anyway
+                user.status = InstanceStatus.STOPPED.value
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Emulator is not running.'
+                }
+
+            except (EmulatorNotFoundError, WindowError) as e:
+                user.status = InstanceStatus.ERROR.value
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': f'Error stopping: {str(e)}'
+                }
+
+        # Add operation to queue (higher priority for stop)
+        operation_id = await self.operation_queue.add_operation(
+            operation_type=OperationType.STOP,
+            user_id=user.discord_id,
+            user_name=user.discord_name,
+            emulator_index=user.emulator_index,
+            priority=Priority.HIGH,  # Stop operations have higher priority
+            timeout=45,
+            callback=stop_operation,
+            metadata={'emulator_name': user.emulator_name}
+        )
+
+        # Wait for operation to complete
+        result = await self.operation_queue.wait_for_operation(operation_id, timeout=90)
+
+        if result is None:
+            return {
+                'success': False,
+                'message': 'Operation timed out. Please try again or contact admin.'
+            }
+
+        if result.status == OperationStatus.COMPLETED:
+            return result.result or {'success': False, 'message': 'Unknown error'}
+        else:
+            return {
+                'success': False,
+                'message': f'Operation failed: {result.error or "Unknown error"}'
+            }

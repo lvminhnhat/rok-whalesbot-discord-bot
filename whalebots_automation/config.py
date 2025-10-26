@@ -40,7 +40,7 @@ class UIConfiguration:
     # Click coordinates and spacing
     base_x_coordinate: int = 16
     base_y_coordinate: int = 15
-    step_size: int = 26
+    step_size: int = 20
     max_visible_items: int = 6
 
     # Timing settings
@@ -51,7 +51,7 @@ class UIConfiguration:
 
     # Scroll settings
     scroll_wheel_amount: int = 120
-    default_scroll_up: int = 25
+    default_scroll_up: int = 40
     scroll_position_x: int = 50
     scroll_position_y: int = 50
     

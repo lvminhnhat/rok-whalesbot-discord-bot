@@ -13,6 +13,7 @@ from shared.data_manager import DataManager
 from shared.constants import InstanceStatus
 from discord_bot.services.bot_service import BotService
 from discord_bot.services.subscription_service import SubscriptionService
+from discord_bot.services.ui_operation_queue import UIOperationQueue
 from discord_bot.utils.permissions import init_permission_checker
 from discord_bot.commands.user_commands import setup_user_commands
 from discord_bot.commands.admin_commands import setup_admin_commands
@@ -39,7 +40,12 @@ class WhaleBotDiscord(discord.Bot):
         
         # Initialize services
         self.data_manager = DataManager()
-        self.bot_service = BotService(whalebots_path, self.data_manager)
+
+        # Initialize UI operation queue
+        self.operation_queue = UIOperationQueue(max_concurrent_operations=1)
+
+        # Initialize bot service with queue support
+        self.bot_service = BotService(whalebots_path, self.data_manager, self.operation_queue)
         self.subscription_service = SubscriptionService(self.data_manager)
         
         # Initialize permission checker
@@ -77,6 +83,10 @@ class WhaleBotDiscord(discord.Bot):
         if not self.state_sync_task.is_running():
             self.state_sync_task.start()
             print("[OK] State sync task started")
+
+        # Start UI operation queue processor
+        await self.operation_queue.start_processor()
+        print("[OK] UI operation queue started")
 
         # Set bot status
         await self.change_presence(

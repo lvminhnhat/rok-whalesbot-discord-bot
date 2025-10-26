@@ -58,14 +58,8 @@ class BotService:
             emulator_states = self.whalesbot.get_emulator_states()
             for state in emulator_states:
                 if state.index == emulator_index:
-                    # Handle different possible state properties
-                    if hasattr(state, 'is_running'):
-                        return state.is_running
-                    elif hasattr(state, 'running'):
-                        return state.running
-                    elif hasattr(state, 'status') and state.status == 'running':
-                        return True
-                    # Add more fallback checks if needed
+                    # Use the is_active property from EmulatorState class
+                    return state.is_active
             return False
         except Exception as e:
             print(f"[ERROR] Failed to get actual emulator state for index {emulator_index}: {e}")

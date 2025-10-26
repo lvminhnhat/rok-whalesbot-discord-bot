@@ -23,7 +23,7 @@
             <nav id="sidebar" class="col-md-3 col-lg-2 d-md-block bg-dark sidebar collapse">
                 <div class="position-sticky pt-3">
                     <div class="sidebar-header text-center mb-4">
-                        <h4 class="text-white">🐋 WhaleBots</h4>
+                        <h4 class="text-white">⛏️ Miner</h4>
                         <small class="text-muted">Admin Dashboard</small>
                     </div>
                     
@@ -70,6 +70,13 @@
 
             <!-- Main content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <!-- Security Warning Banner -->
+                <div class="alert alert-warning alert-dismissible fade show mt-3" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                    <strong>Security Notice:</strong> This dashboard has NO authentication. Ensure it's only accessible on trusted networks.
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+
                 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
                     <h1 class="h2">{% block page_title %}Dashboard{% endblock %}</h1>
                     <div class="btn-toolbar mb-2 mb-md-0">

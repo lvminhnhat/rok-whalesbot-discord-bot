@@ -128,16 +128,16 @@ def update_cooldown():
     """Update cooldown setting."""
     data_manager = current_app.data_manager
     data = request.get_json()
-    
+
     seconds = data.get('seconds')
-    
+
     if seconds is None or not isinstance(seconds, int) or seconds < 0:
         return jsonify({'success': False, 'message': 'Invalid seconds parameter'}), 400
-    
+
     config = data_manager.get_config()
     config.cooldown_seconds = seconds
     data_manager.save_config(config)
-    
+
     data_manager.log_action(
         user_id="system",
         user_name="Web Admin",
@@ -146,6 +146,153 @@ def update_cooldown():
         result=ActionResult.SUCCESS,
         performed_by="web_admin"
     )
-    
+
     return jsonify({'success': True, 'message': f'Cooldown set to {seconds} seconds'})
+
+
+@config_bp.route('/admin_users', methods=['POST'])
+def update_admin_users():
+    """Update admin users list."""
+    data_manager = current_app.data_manager
+    data = request.get_json()
+
+    action = data.get('action')
+    user_id = data.get('user_id')
+    user_name = data.get('user_name', f'User {user_id}')
+
+    if not action or not user_id:
+        return jsonify({'success': False, 'message': 'Missing action or user_id'}), 400
+
+    # Validate user_id format (should be a numeric string)
+    if not user_id.isdigit() or len(user_id) < 17 or len(user_id) > 19:
+        return jsonify({'success': False, 'message': 'Invalid Discord user ID format'}), 400
+
+    config = data_manager.get_config()
+
+    if action == 'add':
+        if user_id not in config.admin_users:
+            config.admin_users.append(user_id)
+            data_manager.save_config(config)
+
+            data_manager.log_action(
+                user_id="system",
+                user_name="Web Admin",
+                action=ActionType.CONFIG_UPDATE,
+                details=f"Added admin user {user_name} ({user_id})",
+                result=ActionResult.SUCCESS,
+                performed_by="web_admin"
+            )
+
+            return jsonify({'success': True, 'message': f'Admin user {user_name} added successfully'})
+        else:
+            return jsonify({'success': False, 'message': 'User is already an admin'})
+
+    elif action == 'remove':
+        if user_id in config.admin_users:
+            # Prevent removing the last admin
+            if len(config.admin_users) <= 1:
+                return jsonify({'success': False, 'message': 'Cannot remove the last admin user'}), 400
+
+            config.admin_users.remove(user_id)
+            data_manager.save_config(config)
+
+            data_manager.log_action(
+                user_id="system",
+                user_name="Web Admin",
+                action=ActionType.CONFIG_UPDATE,
+                details=f"Removed admin user {user_name} ({user_id})",
+                result=ActionResult.SUCCESS,
+                performed_by="web_admin"
+            )
+
+            return jsonify({'success': True, 'message': f'Admin user {user_name} removed successfully'})
+        else:
+            return jsonify({'success': False, 'message': 'User is not an admin'})
+
+    return jsonify({'success': False, 'message': 'Invalid action'}), 400
+
+
+@config_bp.route('/admin_roles', methods=['POST'])
+def update_admin_roles():
+    """Update admin roles list."""
+    data_manager = current_app.data_manager
+    data = request.get_json()
+
+    action = data.get('action')
+    role_id = data.get('role_id')
+    role_name = data.get('role_name', f'Role {role_id}')
+
+    if not action or not role_id:
+        return jsonify({'success': False, 'message': 'Missing action or role_id'}), 400
+
+    # Validate role_id format (should be a numeric string)
+    if not role_id.isdigit() or len(role_id) < 17 or len(role_id) > 19:
+        return jsonify({'success': False, 'message': 'Invalid Discord role ID format'}), 400
+
+    config = data_manager.get_config()
+
+    if action == 'add':
+        if role_id not in config.admin_roles:
+            config.admin_roles.append(role_id)
+            data_manager.save_config(config)
+
+            data_manager.log_action(
+                user_id="system",
+                user_name="Web Admin",
+                action=ActionType.CONFIG_UPDATE,
+                details=f"Added admin role {role_name} ({role_id})",
+                result=ActionResult.SUCCESS,
+                performed_by="web_admin"
+            )
+
+            return jsonify({'success': True, 'message': f'Admin role {role_name} added successfully'})
+        else:
+            return jsonify({'success': False, 'message': 'Role is already an admin role'})
+
+    elif action == 'remove':
+        if role_id in config.admin_roles:
+            config.admin_roles.remove(role_id)
+            data_manager.save_config(config)
+
+            data_manager.log_action(
+                user_id="system",
+                user_name="Web Admin",
+                action=ActionType.CONFIG_UPDATE,
+                details=f"Removed admin role {role_name} ({role_id})",
+                result=ActionResult.SUCCESS,
+                performed_by="web_admin"
+            )
+
+            return jsonify({'success': True, 'message': f'Admin role {role_name} removed successfully'})
+        else:
+            return jsonify({'success': False, 'message': 'Role is not an admin role'})
+
+    return jsonify({'success': False, 'message': 'Invalid action'}), 400
+
+
+@config_bp.route('/max_emulators', methods=['POST'])
+def update_max_emulators():
+    """Update maximum emulators setting."""
+    data_manager = current_app.data_manager
+    data = request.get_json()
+
+    max_emulators = data.get('max_emulators')
+
+    if max_emulators is None or not isinstance(max_emulators, int) or max_emulators < 1:
+        return jsonify({'success': False, 'message': 'Invalid max_emulators parameter (must be >= 1)'}), 400
+
+    config = data_manager.get_config()
+    config.max_emulators = max_emulators
+    data_manager.save_config(config)
+
+    data_manager.log_action(
+        user_id="system",
+        user_name="Web Admin",
+        action=ActionType.CONFIG_UPDATE,
+        details=f"Set max emulators to {max_emulators}",
+        result=ActionResult.SUCCESS,
+        performed_by="web_admin"
+    )
+
+    return jsonify({'success': True, 'message': f'Maximum emulators set to {max_emulators}'})
 

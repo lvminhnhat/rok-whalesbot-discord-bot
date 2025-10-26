@@ -45,7 +45,49 @@
 
 <div class="row">
     <div class="col-md-6">
-        <div class="card">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-person-check"></i> Admin Users</h5>
+            </div>
+            <div class="card-body">
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control" id="admin-user-id-input" placeholder="Discord User ID">
+                    <input type="text" class="form-control" id="admin-user-name-input" placeholder="User Name (optional)">
+                    <button class="btn btn-success" onclick="addAdminUser()">
+                        <i class="bi bi-plus"></i> Add
+                    </button>
+                </div>
+                <ul class="list-group" id="admin-user-list">
+                    <li class="list-group-item text-muted">Loading...</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-shield-check"></i> Admin Roles</h5>
+            </div>
+            <div class="card-body">
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control" id="admin-role-id-input" placeholder="Discord Role ID">
+                    <input type="text" class="form-control" id="admin-role-name-input" placeholder="Role Name (optional)">
+                    <button class="btn btn-success" onclick="addAdminRole()">
+                        <i class="bi bi-plus"></i> Add
+                    </button>
+                </div>
+                <ul class="list-group" id="admin-role-list">
+                    <li class="list-group-item text-muted">Loading...</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-3">
             <div class="card-header">
                 <h5 class="mb-0"><i class="bi bi-clock"></i> Cooldown Setting</h5>
             </div>
@@ -60,6 +102,57 @@
             </div>
         </div>
     </div>
+
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-server"></i> Max Emulators Setting</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Maximum Emulators:</label>
+                    <input type="number" class="form-control" id="max-emulators-input" min="1" value="20">
+                </div>
+                <button class="btn btn-primary" onclick="updateMaxEmulators()">
+                    <i class="bi bi-save"></i> Save Max Emulators
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-info-circle"></i> Admin Management Help</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-person"></i> How to Get Discord User ID:</h6>
+                        <ol class="small">
+                            <li>Go to Discord Settings > Advanced</li>
+                            <li>Enable "Developer Mode"</li>
+                            <li>Right-click on a user and select "Copy User ID"</li>
+                        </ol>
+                    </div>
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-shield"></i> How to Get Discord Role ID:</h6>
+                        <ol class="small">
+                            <li>Go to Discord Settings > Advanced</li>
+                            <li>Enable "Developer Mode"</li>
+                            <li>Right-click on a role and select "Copy Role ID"</li>
+                        </ol>
+                    </div>
+                </div>
+                <div class="alert alert-warning mt-3 mb-0">
+                    <i class="bi bi-exclamation-triangle"></i> <strong>Security Note:</strong>
+                    Only grant admin access to trusted users. Admins can manage all users and system settings.
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -71,11 +164,14 @@ async function loadConfig() {
     try {
         const response = await fetch('/api/config');
         config = await response.json();
-        
+
         renderGuilds();
         renderChannels();
-        
+        renderAdminUsers();
+        renderAdminRoles();
+
         document.getElementById('cooldown-input').value = config.cooldown_seconds;
+        document.getElementById('max-emulators-input').value = config.max_emulators;
     } catch (error) {
         console.error('Error loading config:', error);
         showToast('Error loading config: ' + error.message, 'danger');
@@ -218,19 +314,229 @@ async function removeChannel(channelId) {
 
 async function updateCooldown() {
     const seconds = parseInt(document.getElementById('cooldown-input').value);
-    
+
     if (isNaN(seconds) || seconds < 0) {
         showToast('Invalid cooldown value', 'warning');
         return;
     }
-    
+
     try {
         const response = await fetch('/api/config/cooldown', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({seconds})
         });
-        
+
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'danger');
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+function renderAdminUsers() {
+    const list = document.getElementById('admin-user-list');
+    list.innerHTML = '';
+
+    if (config.admin_users.length === 0) {
+        list.innerHTML = '<li class="list-group-item text-muted">No admin users configured</li>';
+        return;
+    }
+
+    config.admin_users.forEach(userId => {
+        const item = document.createElement('li');
+        item.className = 'list-group-item d-flex justify-content-between align-items-center';
+        item.innerHTML = `
+            <div>
+                <code>${userId}</code>
+                <small class="text-muted d-block">Discord User ID</small>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeAdminUser('${userId}')"
+                    ${config.admin_users.length <= 1 ? 'disabled title="Cannot remove the last admin"' : ''}>
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function renderAdminRoles() {
+    const list = document.getElementById('admin-role-list');
+    list.innerHTML = '';
+
+    if (config.admin_roles.length === 0) {
+        list.innerHTML = '<li class="list-group-item text-muted">No admin roles configured</li>';
+        return;
+    }
+
+    config.admin_roles.forEach(roleId => {
+        const item = document.createElement('li');
+        item.className = 'list-group-item d-flex justify-content-between align-items-center';
+        item.innerHTML = `
+            <div>
+                <code>${roleId}</code>
+                <small class="text-muted d-block">Discord Role ID</small>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeAdminRole('${roleId}')">
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+        list.appendChild(item);
+    });
+}
+
+async function addAdminUser() {
+    const userId = document.getElementById('admin-user-id-input').value.trim();
+    const userName = document.getElementById('admin-user-name-input').value.trim();
+
+    if (!userId) {
+        showToast('Please enter a Discord user ID', 'warning');
+        return;
+    }
+
+    // Basic validation for Discord user ID
+    if (!/^\d{17,19}$/.test(userId)) {
+        showToast('Invalid Discord user ID format (should be 17-19 digits)', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/admin_users', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                action: 'add',
+                user_id: userId,
+                user_name: userName || `User ${userId}`
+            })
+        });
+
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+
+        if (result.success) {
+            document.getElementById('admin-user-id-input').value = '';
+            document.getElementById('admin-user-name-input').value = '';
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function removeAdminUser(userId) {
+    if (config.admin_users.length <= 1) {
+        showToast('Cannot remove the last admin user', 'warning');
+        return;
+    }
+
+    if (!confirm('Are you sure you want to remove this admin user?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/admin_users', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                action: 'remove',
+                user_id: userId,
+                user_name: `User ${userId}`
+            })
+        });
+
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+
+        if (result.success) {
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function addAdminRole() {
+    const roleId = document.getElementById('admin-role-id-input').value.trim();
+    const roleName = document.getElementById('admin-role-name-input').value.trim();
+
+    if (!roleId) {
+        showToast('Please enter a Discord role ID', 'warning');
+        return;
+    }
+
+    // Basic validation for Discord role ID
+    if (!/^\d{17,19}$/.test(roleId)) {
+        showToast('Invalid Discord role ID format (should be 17-19 digits)', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/admin_roles', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                action: 'add',
+                role_id: roleId,
+                role_name: roleName || `Role ${roleId}`
+            })
+        });
+
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+
+        if (result.success) {
+            document.getElementById('admin-role-id-input').value = '';
+            document.getElementById('admin-role-name-input').value = '';
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function removeAdminRole(roleId) {
+    if (!confirm('Are you sure you want to remove this admin role?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/admin_roles', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                action: 'remove',
+                role_id: roleId,
+                role_name: `Role ${roleId}`
+            })
+        });
+
+        const result = await response.json();
+        showToast(result.message, result.success ? 'success' : 'warning');
+
+        if (result.success) {
+            loadConfig();
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'danger');
+    }
+}
+
+async function updateMaxEmulators() {
+    const maxEmulators = parseInt(document.getElementById('max-emulators-input').value);
+
+    if (isNaN(maxEmulators) || maxEmulators < 1) {
+        showToast('Invalid max emulators value (must be >= 1)', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/max_emulators', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({max_emulators: maxEmulators})
+        });
+
         const result = await response.json();
         showToast(result.message, result.success ? 'success' : 'danger');
     } catch (error) {

@@ -426,7 +426,7 @@ class WhaleBots:
             scroll_down = 0
         else:
             # Need to scroll down
-            click_y = self.config.ui.base_y_coordinate + self.config.ui.step_size * (self.config.ui.max_visible_items - 1 -1)
+            click_y = self.config.ui.base_y_coordinate + self.config.ui.step_size * (self.config.ui.max_visible_items - 1 )
             scroll_down = index - (self.config.ui.max_visible_items - 1)
 
         click_x = self.config.ui.base_x_coordinate

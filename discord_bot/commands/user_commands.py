@@ -60,7 +60,7 @@ def setup_user_commands(
         await ctx.defer(ephemeral=True)
         
         # Start instance
-        result = bot_service.start_instance(user_id)
+        result = await bot_service.start_instance(user_id)
         
         # Log action
         data_manager.log_action(
@@ -91,7 +91,7 @@ def setup_user_commands(
         await ctx.defer(ephemeral=True)
         
         # Stop instance
-        result = bot_service.stop_instance(user_id)
+        result = await bot_service.stop_instance(user_id)
         
         # Log action
         data_manager.log_action(
@@ -369,3 +369,77 @@ def setup_user_commands(
         embed.timestamp = datetime.utcnow()
 
         await ctx.respond(embed=embed, ephemeral=True)
+
+    @bot.slash_command(
+        name="queue_status",
+        description="Check current operation queue status"
+    )
+    async def queue_status(ctx: discord.ApplicationContext):
+        """Check current queue status."""
+        # Check if in allowed location
+        allowed, error_msg = in_allowed_channel(ctx)
+        if not allowed:
+            await ctx.respond(error_msg, ephemeral=True)
+            return
+
+        user_id = str(ctx.author.id)
+
+        # Get queue info from bot instance
+        bot_instance = ctx.bot
+        if hasattr(bot_instance, 'operation_queue'):
+            queue_info = bot_instance.operation_queue.get_queue_info()
+            pending_ops = bot_instance.operation_queue.get_pending_operations(limit=10)
+
+            # Check user's position in queue
+            user_pending_ops = [op for op in pending_ops if op['user_name'] == str(ctx.author)]
+
+            embed = discord.Embed(
+                title="Queue Status",
+                color=discord.Color.blue()
+            )
+
+            # Queue statistics
+            embed.add_field(
+                name="Queue Information",
+                value=f"Pending Operations: {queue_info['pending_operations']}\n"
+                      f"Currently Processing: {queue_info['processing_operations']}\n"
+                      f"Processor Active: {'Yes' if queue_info['is_processing'] else 'No'}",
+                inline=True
+            )
+
+            # User's queue position
+            if user_pending_ops:
+                user_op = user_pending_ops[0]
+                embed.add_field(
+                    name="Your Queue Position",
+                    value=f"Operation: {user_op['operation_type'].title()}\n"
+                          f"Position: #{user_op['queue_position']}\n"
+                          f"Emulator: #{user_op['emulator_index']}",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Your Queue Position",
+                    value="No pending operations",
+                    inline=False
+                )
+
+            # Pending operations (show first 5)
+            if pending_ops:
+                queue_text = ""
+                for i, op in enumerate(pending_ops[:5], 1):
+                    queue_text += f"#{i}. {op['operation_type'].title()} - {op['user_name']} (Emulator #{op['emulator_index']})\n"
+
+                if len(pending_ops) > 5:
+                    queue_text += f"... and {len(pending_ops) - 5} more"
+
+                embed.add_field(
+                    name="Pending Operations",
+                    value=queue_text,
+                    inline=False
+                )
+
+            embed.timestamp = datetime.utcnow()
+            await ctx.respond(embed=embed, ephemeral=True)
+        else:
+            await ctx.respond("Queue system is not available.", ephemeral=True)

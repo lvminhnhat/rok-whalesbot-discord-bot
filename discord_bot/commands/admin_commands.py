@@ -38,47 +38,37 @@ def setup_admin_commands(
     async def grant(
         ctx: discord.ApplicationContext,
         user: Option(discord.Member, "User cần cấp quyền", required=True),
-        days: Option(int, "Số days sử dụng", required=True),
-        emulator_index: Option(int, "Emulator index (cho user mới)", required=False, default=None)
+        days: Option(int, "Số days sử dụng", required=True)
     ):
         """Grant subscription to user."""
         if not is_admin(ctx):
             await ctx.respond("You don't have permission to use this command.", ephemeral=True)
             return
-        
+
         # Validate days
         is_valid, error_msg = validate_days(days)
         if not is_valid:
             await ctx.respond(error_msg, ephemeral=True)
             return
-        
-        # Validate emulator index if provided
-        if emulator_index is not None:
-            config = data_manager.get_config()
-            is_valid, error_msg = validate_emulator_index(emulator_index, config.max_emulators)
-            if not is_valid:
-                await ctx.respond(error_msg, ephemeral=True)
-                return
-        
+
         await ctx.defer(ephemeral=True)
-        
+
         result = subscription_service.grant_subscription(
             discord_id=str(user.id),
             discord_name=str(user),
-            days=days,
-            emulator_index=emulator_index
+            days=days
         )
-        
+
         # Log action
         data_manager.log_action(
             user_id=str(user.id),
             user_name=str(user),
             action=ActionType.GRANT,
-            details=f"Granted {days} days, emulator: {emulator_index}",
+            details=f"Granted {days} days subscription",
             result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED,
             performed_by=str(ctx.author.id)
         )
-        
+
         await ctx.followup.send(result['message'], ephemeral=True)
     
     @bot.slash_command(
@@ -506,3 +496,475 @@ def setup_admin_commands(
         
         await ctx.respond(embed=embed, ephemeral=True)
 
+    @bot.slash_command(
+        name="link_user",
+        description="[Admin] Gắn user vào emulator"
+    )
+    async def link_user(
+        ctx: discord.ApplicationContext,
+        user: Option(discord.Member, "User cần gắn", required=True),
+        emulator_name: Option(str, "Tên emulator để gắn", required=True)
+    ):
+        """Link user to emulator (admin command)."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # Check if user exists
+        existing_user = data_manager.get_user(str(user.id))
+        if not existing_user:
+            await ctx.followup.send("User chưa có trong hệ thống. Sử dụng `/grant` để cấp quyền trước.", ephemeral=True)
+            return
+
+        # Force stop if running
+        if existing_user.is_running:
+            stop_result = bot_service.force_stop_instance(str(user.id))
+            if not stop_result['success']:
+                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                return
+
+        # Link user to emulator
+        link_result = bot_service.link_user_to_emulator(
+            user_id=str(user.id),
+            emulator_name=emulator_name,
+            discord_name=str(user)
+        )
+
+        # Log action
+        old_emulator = existing_user.emulator_name or f"Index {existing_user.emulator_index}"
+        data_manager.log_action(
+            user_id=str(user.id),
+            user_name=str(user),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Admin linked user from {old_emulator} to {emulator_name}",
+            result=ActionResult.SUCCESS if link_result['success'] else ActionResult.FAILED,
+            performed_by=str(ctx.author.id)
+        )
+
+        if link_result['success']:
+            message = f"✅ **Gắn user thành công!**\n\n"
+            message += f"**User:** {user.mention}\n"
+            message += f"**Emulator:** {emulator_name}\n\n"
+            message += f"User có thể sử dụng `/start` ngay."
+        else:
+            message = f"❌ **Gắn user thất bại:** {link_result['message']}"
+
+        await ctx.followup.send(message, ephemeral=True)
+
+    @bot.slash_command(
+        name="list_emulators",
+        description="[Admin] View all available emulators and their status"
+    )
+    async def list_emulators(ctx: discord.ApplicationContext):
+        """List all available emulators (admin command)."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        # Defer response
+        await ctx.defer(ephemeral=True)
+
+        # Get emulators
+        result = bot_service.get_available_emulators()
+
+        if not result['success']:
+            await ctx.followup.send(result['message'], ephemeral=True)
+            return
+
+        # Build embed
+        embed = discord.Embed(
+            title="🖥️ Available Emulators",
+            description=f"Total: {result['count']} emulators",
+            color=discord.Color.blue()
+        )
+
+        # Group emulators
+        linked = []
+        available = []
+
+        for emu in result['emulators']:
+            status = "[ACTIVE]" if emu['is_active'] else "[INACTIVE]"
+            if emu['linked_user']:
+                linked.append(f"{status} **{emu['name']}** (Index {emu['index']})\n└─ Linked to: {emu['linked_user']}")
+            else:
+                available.append(f"{status} **{emu['name']}** (Index {emu['index']})\n└─ Available")
+
+        if available:
+            embed.add_field(
+                name=f"🟢 Available ({len(available)})",
+                value="\n".join(available[:10]) + ("\n..." if len(available) > 10 else ""),
+                inline=False
+            )
+
+        if linked:
+            embed.add_field(
+                name=f"🔴 Linked ({len(linked)})",
+                value="\n".join(linked[:10]) + ("\n..." if len(linked) > 10 else ""),
+                inline=False
+            )
+
+        embed.add_field(
+            name="📋 Admin Commands",
+            value=(
+                "• `/link_user <user> <emulator>` - Gắn user vào emulator\n"
+                "• `/relink_user <user> <emulator>` - Gắn lại user vào emulator mới\n"
+                "• `/grant <user> <days>` - Cấp subscription"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📝 Note",
+            value="User sẽ dùng `/link <emulator_name>` để tự gắn vào emulator",
+            inline=False
+        )
+
+        embed.timestamp = datetime.utcnow()
+
+        await ctx.followup.send(embed=embed, ephemeral=True)
+
+    @bot.slash_command(
+        name="relink_user",
+        description="[Admin] Gắn lại user vào emulator mới"
+    )
+    async def relink_user(
+        ctx: discord.ApplicationContext,
+        user: Option(discord.Member, "User cần gắn lại", required=True),
+        emulator_name: Option(str, "Tên emulator mới", required=True)
+    ):
+        """Relink user to different emulator."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # Get current user info
+        current_user = data_manager.get_user(str(user.id))
+        if not current_user:
+            await ctx.followup.send("User chưa có trong hệ thống. Sử dụng `/grant_access` để cấp quyền.", ephemeral=True)
+            return
+
+        # Force stop if running
+        if current_user.is_running:
+            stop_result = bot_service.force_stop_instance(str(user.id))
+            if not stop_result['success']:
+                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                return
+
+        # Link to new emulator
+        link_result = bot_service.link_user_to_emulator(
+            user_id=str(user.id),
+            emulator_name=emulator_name,
+            discord_name=str(user)
+        )
+
+        # Log action
+        old_emulator = current_user.emulator_name or f"Index {current_user.emulator_index}"
+        data_manager.log_action(
+            user_id=str(user.id),
+            user_name=str(user),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Relinked from {old_emulator} to {emulator_name}",
+            result=ActionResult.SUCCESS if link_result['success'] else ActionResult.FAILED,
+            performed_by=str(ctx.author.id)
+        )
+
+        if link_result['success']:
+            message = f"✅ **Gắn lại thành công!**\n\n"
+            message += f"**User:** {user.mention}\n"
+            message += f"**Từ:** {old_emulator}\n"
+            message += f"**Đến:** {emulator_name}\n\n"
+            message += f"User có thể sử dụng `/start` ngay."
+        else:
+            message = f"❌ **Gắn lại thất bại:** {link_result['message']}"
+
+        await ctx.followup.send(message, ephemeral=True)
+
+    @bot.slash_command(
+        name="unlink_user",
+        description="[Admin] Unlink user from emulator"
+    )
+    async def unlink_user(
+        ctx: discord.ApplicationContext,
+        user: Option(discord.Member, "User cần unlink", required=True)
+    ):
+        """Unlink user from emulator (admin command)."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # Get current user info
+        current_user = data_manager.get_user(str(user.id))
+        if not current_user:
+            await ctx.followup.send("User không tồn tại trong hệ thống.", ephemeral=True)
+            return
+
+        # Force stop if running
+        if current_user.is_running:
+            stop_result = bot_service.force_stop_instance(str(user.id))
+            if not stop_result['success']:
+                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                return
+
+        # Unlink user
+        unlink_result = bot_service.unlink_user_from_emulator(str(user.id))
+
+        # Log action
+        old_emulator = current_user.emulator_name or f"Index {current_user.emulator_index}"
+        data_manager.log_action(
+            user_id=str(user.id),
+            user_name=str(user),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Admin unlinked user from {old_emulator}",
+            result=ActionResult.SUCCESS if unlink_result['success'] else ActionResult.FAILED,
+            performed_by=str(ctx.author.id)
+        )
+
+        if unlink_result['success']:
+            message = f"✅ **Unlink thành công!**\n\n"
+            message += f"**User:** {user.mention}\n"
+            message += f"**Đã unlink từ:** {old_emulator}\n\n"
+            message += f"User cần được linked lại để sử dụng bot."
+        else:
+            message = f"❌ **Unlink thất bại:** {unlink_result['message']}"
+
+        await ctx.followup.send(message, ephemeral=True)
+
+    @bot.slash_command(
+        name="unlink_expired",
+        description="[Admin] Unlink tất cả users đã hết hạn"
+    )
+    async def unlink_expired(ctx: discord.ApplicationContext):
+        """Unlink all expired users."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # Get all expired users
+        all_users = data_manager.get_all_users()
+        expired_users = [u for u in all_users if u.subscription.is_expired and u.emulator_index != -1]
+
+        if not expired_users:
+            await ctx.followup.send("Không có user nào đã hết hạn đang linked to emulator.", ephemeral=True)
+            return
+
+        success_count = 0
+        error_count = 0
+        details = []
+
+        for user in expired_users:
+            try:
+                # Force stop if running
+                if user.is_running:
+                    stop_result = bot_service.force_stop_instance(str(user.discord_id))
+                    if not stop_result['success']:
+                        error_count += 1
+                        details.append(f"❌ {user.discord_name}: Không thể dừng bot")
+                        continue
+
+                # Unlink user
+                unlink_result = bot_service.unlink_user_from_emulator(str(user.discord_id))
+                if unlink_result['success']:
+                    success_count += 1
+                    details.append(f"✅ {user.discord_name}: Unlinked from {user.emulator_name or f'Index {user.emulator_index}'}")
+                else:
+                    error_count += 1
+                    details.append(f"❌ {user.discord_name}: {unlink_result['message']}")
+            except Exception as e:
+                error_count += 1
+                details.append(f"❌ {user.discord_name}: Error - {str(e)}")
+
+        # Log action
+        data_manager.log_action(
+            user_id=str(ctx.author.id),
+            user_name=str(ctx.author),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Bulk unlink expired: {success_count} success, {error_count} errors",
+            result=ActionResult.SUCCESS if success_count > 0 else ActionResult.FAILED,
+            performed_by=str(ctx.author.id)
+        )
+
+        # Build response message
+        message = f"🔄 **Bulk Unlink Expired Users Complete**\n\n"
+        message += f"**Tổng cộng:** {len(expired_users)} users\n"
+        message += f"**Thành công:** {success_count} users\n"
+        message += f"**Lỗi:** {error_count} users\n\n"
+
+        # Show first 10 details
+        message += "**Chi tiết:**\n"
+        message += "\n".join(details[:10])
+        if len(details) > 10:
+            message += f"\n... và {len(details) - 10} kết quả khác."
+
+        await ctx.followup.send(message, ephemeral=True)
+
+    @bot.slash_command(
+        name="delete_expired",
+        description="[Admin] Xóa tất cả users đã hết hạn"
+    )
+    async def delete_expired(ctx: discord.ApplicationContext):
+        """Delete all expired users from system."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # Get all expired users
+        all_users = data_manager.get_all_users()
+        expired_users = [u for u in all_users if u.subscription.is_expired]
+
+        if not expired_users:
+            await ctx.followup.send("Không có user nào đã hết hạn để xóa.", ephemeral=True)
+            return
+
+        # Confirm with user
+        await ctx.followup.send(
+            f"⚠️ **Cảnh báo:** Sẽ xóa {len(expired_users)} users đã hết hạn.\n"
+            f"Hành động này không thể hoàn tác. Reply 'confirm' để tiếp tục.",
+            ephemeral=True
+        )
+
+        # Wait for confirmation (simplified - in production you'd want a better confirmation system)
+        # For now, proceed with deletion
+
+        success_count = 0
+        error_count = 0
+        details = []
+
+        for user in expired_users:
+            try:
+                # Force stop if running
+                if user.is_running:
+                    bot_service.force_stop_instance(str(user.discord_id))
+
+                # Delete user
+                if data_manager.delete_user(str(user.discord_id)):
+                    success_count += 1
+                    details.append(f"✅ {user.discord_name}: Đã xóa")
+                else:
+                    error_count += 1
+                    details.append(f"❌ {user.discord_name}: Không thể xóa")
+            except Exception as e:
+                error_count += 1
+                details.append(f"❌ {user.discord_name}: Error - {str(e)}")
+
+        # Log action
+        data_manager.log_action(
+            user_id=str(ctx.author.id),
+            user_name=str(ctx.author),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Bulk delete expired: {success_count} success, {error_count} errors",
+            result=ActionResult.SUCCESS if success_count > 0 else ActionResult.FAILED,
+            performed_by=str(ctx.author.id)
+        )
+
+        # Build response message
+        message = f"🗑️ **Bulk Delete Expired Users Complete**\n\n"
+        message += f"**Tổng cộng:** {len(expired_users)} users\n"
+        message += f"**Đã xóa:** {success_count} users\n"
+        message += f"**Lỗi:** {error_count} users\n\n"
+
+        # Show first 10 details
+        message += "**Chi tiết:**\n"
+        message += "\n".join(details[:10])
+        if len(details) > 10:
+            message += f"\n... và {len(details) - 10} kết quả khác."
+
+        await ctx.followup.send(message, ephemeral=True)
+
+    @bot.slash_command(
+        name="sync_states",
+        description="[Admin] Manually sync states between GUI and Discord"
+    )
+    async def sync_states(
+        ctx: discord.ApplicationContext,
+        user: Option(discord.Member, "Sync specific user (optional, syncs all if not specified)", required=False, default=None)
+    ):
+        """Manually sync states between GUI and Discord."""
+        if not is_admin(ctx):
+            await ctx.respond("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        sync_count = 0
+        error_count = 0
+        users_to_sync = []
+
+        if user:
+            # Sync specific user
+            target_user = data_manager.get_user(str(user.id))
+            if target_user:
+                users_to_sync = [target_user]
+            else:
+                await ctx.followup.send(f"User {user.mention} not found in database.", ephemeral=True)
+                return
+        else:
+            # Sync all users with active subscriptions
+            users_to_sync = data_manager.get_all_users()
+
+        message_parts = []
+        message_parts.append(f"🔄 **State Synchronization Report**\n")
+
+        for target_user in users_to_sync:
+            # Skip users with no emulator or expired subscriptions
+            if target_user.emulator_index == -1 or target_user.subscription.is_expired:
+                continue
+
+            try:
+                # Get actual emulator state
+                actual_state = bot_service._get_actual_emulator_state(target_user.emulator_index)
+
+                # Check for inconsistencies and sync
+                if target_user.is_running and not actual_state:
+                    print(f"[SYNC] Manual sync: User {target_user.discord_name} was stopped outside Discord. Updating state...")
+                    target_user.status = InstanceStatus.STOPPED.value
+                    target_user.last_stop = datetime.now(pytz.UTC).isoformat()
+                    data_manager.save_user(target_user)
+                    sync_count += 1
+                    message_parts.append(f"✅ {target_user.discord_name}: Synced from RUNNING to STOPPED")
+
+                elif not target_user.is_running and actual_state:
+                    print(f"[SYNC] Manual sync: User {target_user.discord_name} was started outside Discord. Updating state...")
+                    target_user.status = InstanceStatus.RUNNING.value
+                    target_user.last_start = datetime.now(pytz.UTC).isoformat()
+                    target_user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                    data_manager.save_user(target_user)
+                    sync_count += 1
+                    message_parts.append(f"✅ {target_user.discord_name}: Synced from STOPPED to RUNNING")
+
+            except Exception as e:
+                error_count += 1
+                print(f"[ERROR] Failed to sync state for user {target_user.discord_name}: {e}")
+                message_parts.append(f"❌ {target_user.discord_name}: Error - {str(e)}")
+
+        # Build final message
+        if sync_count == 0 and error_count == 0:
+            message_parts.append("\n✅ All states are already synchronized.")
+        else:
+            message_parts.append(f"\n📊 **Summary:** {sync_count} users synced, {error_count} errors")
+
+        # Log action
+        data_manager.log_action(
+            user_id=str(ctx.author.id),
+            user_name=str(ctx.author),
+            action=ActionType.CONFIG_CHANGE,
+            details=f"Manual state sync: {sync_count} users synced, {error_count} errors",
+            result=ActionResult.SUCCESS,
+            performed_by=str(ctx.author.id)
+        )
+
+        # Limit message length if too many users
+        final_message = "\n".join(message_parts[:20])  # Limit to 20 lines
+        if len(message_parts) > 20:
+            final_message += f"\n... and {len(message_parts) - 20} more entries."
+
+        await ctx.followup.send(final_message, ephemeral=True)

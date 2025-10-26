@@ -147,13 +147,13 @@ def revoke_user(user_id):
     subscription_service = current_app.subscription_service
     bot_service = current_app.bot_service
     data_manager = current_app.data_manager
-    
+
     # Force stop if running
     bot_service.force_stop_instance(user_id)
-    
+
     # Revoke subscription
     result = subscription_service.revoke(user_id)
-    
+
     # Log action
     user = data_manager.get_user(user_id)
     if user:
@@ -165,6 +165,196 @@ def revoke_user(user_id):
             result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED,
             performed_by="web_admin"
         )
-    
+
     return jsonify(result)
+
+
+@users_bp.route('/<user_id>/unlink', methods=['POST'])
+def unlink_user(user_id):
+    """Unlink user from emulator."""
+    bot_service = current_app.bot_service
+    data_manager = current_app.data_manager
+
+    # Force stop if running
+    bot_service.force_stop_instance(user_id)
+
+    # Unlink user
+    result = bot_service.unlink_user_from_emulator(user_id)
+
+    # Log action
+    user = data_manager.get_user(user_id)
+    if user:
+        data_manager.log_action(
+            user_id=user_id,
+            user_name=user.discord_name,
+            action=ActionType.CONFIG_CHANGE,
+            details="Unlinked from web dashboard",
+            result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED,
+            performed_by="web_admin"
+        )
+
+    return jsonify(result)
+
+
+@users_bp.route('/<user_id>/delete', methods=['DELETE'])
+def delete_user(user_id):
+    """Delete user from system."""
+    bot_service = current_app.bot_service
+    data_manager = current_app.data_manager
+
+    # Get user info before deletion
+    user = data_manager.get_user(user_id)
+    if not user:
+        return jsonify({'success': False, 'message': 'User not found'}), 404
+
+    # Force stop if running
+    try:
+        bot_service.force_stop_instance(user_id)
+    except:
+        pass  # Ignore errors during cleanup
+
+    # Delete user
+    success = data_manager.delete_user(user_id)
+
+    # Log action
+    if user:
+        data_manager.log_action(
+            user_id=user_id,
+            user_name=user.discord_name,
+            action=ActionType.CONFIG_CHANGE,
+            details="Deleted from web dashboard",
+            result=ActionResult.SUCCESS if success else ActionResult.FAILED,
+            performed_by="web_admin"
+        )
+
+    return jsonify({
+        'success': success,
+        'message': 'User deleted successfully' if success else 'Failed to delete user'
+    })
+
+
+@users_bp.route('/bulk-unlink-expired', methods=['POST'])
+def bulk_unlink_expired():
+    """Unlink all expired users."""
+    bot_service = current_app.bot_service
+    data_manager = current_app.data_manager
+
+    # Get all expired users with emulators
+    all_users = data_manager.get_all_users()
+    expired_users = [u for u in all_users if u.subscription.is_expired and u.emulator_index != -1]
+
+    if not expired_users:
+        return jsonify({
+            'success': True,
+            'message': 'No expired users with emulators found',
+            'results': []
+        })
+
+    results = []
+    success_count = 0
+
+    for user in expired_users:
+        try:
+            # Force stop if running
+            if user.is_running:
+                bot_service.force_stop_instance(user.discord_id)
+
+            # Unlink user
+            result = bot_service.unlink_user_from_emulator(user.discord_id)
+            results.append({
+                'user_id': user.discord_id,
+                'user_name': user.discord_name,
+                'success': result['success'],
+                'message': result['message']
+            })
+
+            if result['success']:
+                success_count += 1
+
+        except Exception as e:
+            results.append({
+                'user_id': user.discord_id,
+                'user_name': user.discord_name,
+                'success': False,
+                'message': str(e)
+            })
+
+    # Log action
+    data_manager.log_action(
+        user_id="web_admin",
+        user_name="Web Admin",
+        action=ActionType.CONFIG_CHANGE,
+        details=f"Bulk unlink expired: {success_count}/{len(expired_users)} success",
+        result=ActionResult.SUCCESS if success_count > 0 else ActionResult.FAILED,
+        performed_by="web_admin"
+    )
+
+    return jsonify({
+        'success': success_count > 0,
+        'message': f'Unlinked {success_count}/{len(expired_users)} expired users',
+        'results': results
+    })
+
+
+@users_bp.route('/bulk-delete-expired', methods=['DELETE'])
+def bulk_delete_expired():
+    """Delete all expired users."""
+    bot_service = current_app.bot_service
+    data_manager = current_app.data_manager
+
+    # Get all expired users
+    all_users = data_manager.get_all_users()
+    expired_users = [u for u in all_users if u.subscription.is_expired]
+
+    if not expired_users:
+        return jsonify({
+            'success': True,
+            'message': 'No expired users found',
+            'results': []
+        })
+
+    results = []
+    success_count = 0
+
+    for user in expired_users:
+        try:
+            # Force stop if running
+            if user.is_running:
+                bot_service.force_stop_instance(user.discord_id)
+
+            # Delete user
+            success = data_manager.delete_user(user.discord_id)
+            results.append({
+                'user_id': user.discord_id,
+                'user_name': user.discord_name,
+                'success': success,
+                'message': 'Deleted successfully' if success else 'Failed to delete'
+            })
+
+            if success:
+                success_count += 1
+
+        except Exception as e:
+            results.append({
+                'user_id': user.discord_id,
+                'user_name': user.discord_name,
+                'success': False,
+                'message': str(e)
+            })
+
+    # Log action
+    data_manager.log_action(
+        user_id="web_admin",
+        user_name="Web Admin",
+        action=ActionType.CONFIG_CHANGE,
+        details=f"Bulk delete expired: {success_count}/{len(expired_users)} success",
+        result=ActionResult.SUCCESS if success_count > 0 else ActionResult.FAILED,
+        performed_by="web_admin"
+    )
+
+    return jsonify({
+        'success': success_count > 0,
+        'message': f'Deleted {success_count}/{len(expired_users)} expired users',
+        'results': results
+    })
 

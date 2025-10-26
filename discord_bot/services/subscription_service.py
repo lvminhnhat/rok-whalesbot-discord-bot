@@ -78,41 +78,33 @@ class SubscriptionService:
             # Extend existing subscription
             return self.add_days(discord_id, days)
         else:
-            # Create new user
-            if emulator_index is None:
-                return {
-                    'success': False,
-                    'message': '❌ Emulator index is required for new user'
-                }
-            
-            # Check if emulator is already assigned
-            if self.data_manager.is_emulator_assigned(emulator_index):
-                return {
-                    'success': False,
-                    'message': f'❌ Emulator {emulator_index} đã được gán cho user khác'
-                }
-            
+            # Create new user without emulator requirement
             now = datetime.now(pytz.UTC)
             end_date = now + timedelta(days=days)
-            
+
             subscription = Subscription(
                 start_at=now.isoformat(),
                 end_at=end_date.isoformat()
             )
-            
+
             new_user = User(
                 discord_id=discord_id,
                 discord_name=discord_name,
-                emulator_index=emulator_index,
+                emulator_index=-1,  # -1 means not linked yet
+                emulator_name=None,
                 subscription=subscription,
                 status=InstanceStatus.STOPPED.value
             )
-            
+
             self.data_manager.save_user(new_user)
-            
+
+            message = f'✅ Đã cấp {days} days cho {discord_name}\n'
+            message += f'Expires: {end_date.strftime("%Y-%m-%d")}\n'
+            message += f'User cần gắn emulator bằng lệnh `/link <emulator_name>` hoặc admin gắn bằng `/link_user`'
+
             return {
                 'success': True,
-                'message': f'✅ Đã cấp {days} days cho {discord_name}\nEmulator: {emulator_index}\nExpires: {end_date.strftime("%Y-%m-%d")}'
+                'message': message
             }
     
     def add_days(self, user_id: str, days: int) -> dict:

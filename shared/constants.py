@@ -32,6 +32,7 @@ class ActionResult(str, Enum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     DENIED = "DENIED"
+    PARTIAL = "PARTIAL"
 
 
 # Default configuration values

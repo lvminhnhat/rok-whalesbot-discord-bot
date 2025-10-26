@@ -1,6 +1,6 @@
-# WhaleBots Discord Bot + Web Dashboard
+# Miner Discord Bot + Web Dashboard
 
-Complete management system for WhaleBots automation with Discord bot integration and web-based administration.
+Complete management system for Miner automation with Discord bot integration and web-based administration.
 
 ## Features
 
@@ -28,6 +28,7 @@ Complete management system for WhaleBots automation with Discord bot integration
 - ✅ User → Emulator mapping
 - ✅ Heartbeat monitoring
 - ✅ Status tracking
+- ✅ **NEW: Automatic GUI-Discord state synchronization**
 
 ## Quick Start
 

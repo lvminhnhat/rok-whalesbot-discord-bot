@@ -73,11 +73,16 @@ class WhaleBotDiscord(discord.Bot):
             self.emulator_validator.start()
             print("[OK] Emulator validator started")
 
+        # Start state sync task
+        if not self.state_sync_task.is_running():
+            self.state_sync_task.start()
+            print("[OK] State sync task started")
+
         # Set bot status
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name="WhaleBots instances"
+                name="Miner instances"
             )
         )
     
@@ -213,6 +218,57 @@ class WhaleBotDiscord(discord.Bot):
         """Wait for bot to be ready before starting emulator validator."""
         await self.wait_until_ready()
 
+    @tasks.loop(minutes=3)
+    async def state_sync_task(self):
+        """Background task to sync states between GUI and Discord."""
+        try:
+            print("[INFO] Running state synchronization...")
+
+            # Get all users with active subscriptions
+            all_users = self.data_manager.get_all_users()
+            sync_count = 0
+
+            for user in all_users:
+                # Skip users with no emulator or expired subscriptions
+                if user.emulator_index == -1 or user.subscription.is_expired:
+                    continue
+
+                # Get actual emulator state
+                try:
+                    actual_state = self.bot_service._get_actual_emulator_state(user.emulator_index)
+
+                    # Check for inconsistencies
+                    if user.is_running and not actual_state:
+                        print(f"[SYNC] Background sync: User {user.discord_name} was stopped outside Discord. Updating state...")
+                        user.status = InstanceStatus.STOPPED.value
+                        user.last_stop = datetime.now(pytz.UTC).isoformat()
+                        self.data_manager.save_user(user)
+                        sync_count += 1
+
+                    elif not user.is_running and actual_state:
+                        print(f"[SYNC] Background sync: User {user.discord_name} was started outside Discord. Updating state...")
+                        user.status = InstanceStatus.RUNNING.value
+                        user.last_start = datetime.now(pytz.UTC).isoformat()
+                        user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                        self.data_manager.save_user(user)
+                        sync_count += 1
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to sync state for user {user.discord_name}: {e}")
+
+            if sync_count > 0:
+                print(f"[INFO] State synchronization completed: {sync_count} users synced")
+            else:
+                print("[INFO] State synchronization completed: All states consistent")
+
+        except Exception as e:
+            print(f"[ERROR] Error in state sync task: {e}")
+
+    @state_sync_task.before_loop
+    async def before_state_sync_task(self):
+        """Wait for bot to be ready before starting state sync task."""
+        await self.wait_until_ready()
+
     async def close(self):
         """Cleanup on bot shutdown."""
         print("[INFO] Shutting down bot...")
@@ -226,6 +282,9 @@ class WhaleBotDiscord(discord.Bot):
 
         if self.emulator_validator.is_running():
             self.emulator_validator.stop()
+
+        if self.state_sync_task.is_running():
+            self.state_sync_task.stop()
 
         # Cleanup bot service
         self.bot_service.cleanup()

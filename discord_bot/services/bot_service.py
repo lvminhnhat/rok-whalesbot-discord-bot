@@ -38,14 +38,42 @@ class BotService:
         if self._whalesbot is None:
             self._whalesbot = WhaleBots(self.whalebots_path)
         return self._whalesbot
+
+    def _get_actual_emulator_state(self, emulator_index: int) -> bool:
+        """
+        Get the actual running state of an emulator.
+
+        Args:
+            emulator_index: Index of the emulator to check
+
+        Returns:
+            True if emulator is actually running, False otherwise
+        """
+        try:
+            emulator_states = self.whalesbot.get_emulator_states()
+            for state in emulator_states:
+                if state.index == emulator_index:
+                    # Handle different possible state properties
+                    if hasattr(state, 'is_running'):
+                        return state.is_running
+                    elif hasattr(state, 'running'):
+                        return state.running
+                    elif hasattr(state, 'status') and state.status == 'running':
+                        return True
+                    # Add more fallback checks if needed
+            return False
+        except Exception as e:
+            print(f"[ERROR] Failed to get actual emulator state for index {emulator_index}: {e}")
+            # Return False on error to be safe - we don't want to start a bot that might already be running
+            return False
     
     def start_instance(self, user_id: str) -> Dict[str, Any]:
         """
         Start bot instance for user.
-        
+
         Args:
             user_id: Discord user ID
-            
+
         Returns:
             Result dictionary with success status and message
         """
@@ -55,7 +83,7 @@ class BotService:
                 'success': False,
                 'message': "You don't have access. Please contact admin."
             }
-        
+
         # Check if user is linked to an emulator (by index)
         if user.emulator_index == -1:
             return {
@@ -74,19 +102,53 @@ class BotService:
             except Exception:
                 # Ignore errors here; starting by index may still work
                 pass
-        
+
         # Check subscription
         if user.subscription.is_expired:
             return {
                 'success': False,
                 'message': f'Your subscription expired on {user.subscription.end_at}. Please renew.'
             }
-        
-        # Check if already running
-        if user.is_running:
+
+        # Check actual emulator state before proceeding
+        try:
+            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+
+            # Check if database says running but emulator is actually stopped (GUI stop scenario)
+            if user.is_running and not actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing state...")
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Detected state inconsistency. Your miner was stopped outside Discord. Status has been synchronized. Please try starting again.'
+                }
+
+            # Check if already running (both database and actual state agree)
+            if user.is_running and actual_emulator_state:
+                return {
+                    'success': False,
+                    'message': 'Your miner is already running.'
+                }
+
+            # Check if emulator is actually running but database says stopped (GUI start scenario)
+            if not user.is_running and actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says STOPPED but emulator is RUNNING. Syncing state...")
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Detected state inconsistency. Your miner was started outside Discord. Status has been synchronized. Use /status to check current state.'
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to check emulator state for user {user.discord_name}: {e}")
+            # Continue with start attempt but warn about potential issues
             return {
                 'success': False,
-                'message': 'Your bot is already running.'
+                'message': f'Unable to verify emulator state. Please try again. Error: {str(e)}'
             }
         
         # Try to start
@@ -101,7 +163,7 @@ class BotService:
             
             return {
                 'success': True,
-                'message': f'Bot started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days'
+                'message': f'Miner started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days'
             }
             
         except EmulatorAlreadyRunningError:
@@ -132,10 +194,10 @@ class BotService:
     def stop_instance(self, user_id: str) -> Dict[str, Any]:
         """
         Stop bot instance for user.
-        
+
         Args:
             user_id: Discord user ID
-            
+
         Returns:
             Result dictionary with success status and message
         """
@@ -145,12 +207,44 @@ class BotService:
                 'success': False,
                 'message': "You don't have access."
             }
-        
-        # Check if running
-        if not user.is_running:
+
+        # Check actual emulator state before proceeding
+        try:
+            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+
+            # Check if database says running but emulator is actually stopped (GUI stop scenario)
+            if user.is_running and not actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED during stop command. Syncing state...")
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                return {
+                    'success': False,
+                    'message': 'Your miner is already stopped (state synchronized). No action needed.'
+                }
+
+            # Check if database says stopped but emulator is actually running (GUI start scenario)
+            if not user.is_running and actual_emulator_state:
+                print(f"[SYNC] User {user.discord_name} database says STOPPED but emulator is RUNNING during stop command. Syncing state...")
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                # Now proceed with actual stop
+                # Fall through to the stop logic below after sync
+
+            # Check if not running (both database and actual state agree after potential sync)
+            if not user.is_running and not actual_emulator_state:
+                return {
+                    'success': False,
+                    'message': 'Your miner is not running.'
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to check emulator state for user {user.discord_name} during stop: {e}")
+            # Continue with stop attempt but warn about potential issues
             return {
                 'success': False,
-                'message': 'Your bot is not running.'
+                'message': f'Unable to verify emulator state. Please try again. Error: {str(e)}'
             }
         
         # Try to stop
@@ -170,7 +264,7 @@ class BotService:
             
             return {
                 'success': True,
-                'message': f'Bot stopped successfully!{uptime_text}'
+                'message': f'Miner stopped successfully!{uptime_text}'
             }
             
         except EmulatorNotRunningError:
@@ -201,10 +295,10 @@ class BotService:
     def get_status(self, user_id: str) -> Dict[str, Any]:
         """
         Get bot status for user.
-        
+
         Args:
             user_id: Discord user ID
-            
+
         Returns:
             Status dictionary
         """
@@ -214,7 +308,32 @@ class BotService:
                 'exists': False,
                 'message': "You don't have access."
             }
-        
+
+        # Check actual emulator state and sync if needed
+        if user.emulator_index != -1:
+            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+
+            # Auto-sync state if inconsistency detected
+            state_synced = False
+            sync_message = ""
+
+            if user.is_running and not actual_emulator_state:
+                print(f"[SYNC] Status check: User {user.discord_name} database says RUNNING but emulator is STOPPED. Auto-syncing...")
+                user.status = InstanceStatus.STOPPED.value
+                user.last_stop = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                state_synced = True
+                sync_message = " (State auto-synchronized: was stopped outside Discord)"
+
+            elif not user.is_running and actual_emulator_state:
+                print(f"[SYNC] Status check: User {user.discord_name} database says STOPPED but emulator is RUNNING. Auto-syncing...")
+                user.status = InstanceStatus.RUNNING.value
+                user.last_start = datetime.now(pytz.UTC).isoformat()
+                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                self.data_manager.save_user(user)
+                state_synced = True
+                sync_message = " (State auto-synchronized: was started outside Discord)"
+
         # Build status message (text-only, no emojis)
         status_symbols = {
             InstanceStatus.RUNNING.value: '[RUNNING]',
@@ -222,13 +341,13 @@ class BotService:
             InstanceStatus.EXPIRED.value: '[EXPIRED]',
             InstanceStatus.ERROR.value: '[ERROR]'
         }
-        
+
         status = user.status
         if user.subscription.is_expired:
             status = InstanceStatus.EXPIRED.value
-        
+
         symbol = status_symbols.get(status, '[UNKNOWN]')
-        
+
         info = {
             'exists': True,
             'status': status,
@@ -238,9 +357,11 @@ class BotService:
             'uptime_seconds': user.uptime_seconds,
             'last_heartbeat': user.last_heartbeat,
             'subscription_active': user.subscription.is_active,
-            'days_left': user.subscription.days_left
+            'days_left': user.subscription.days_left,
+            'state_synced': state_synced if 'state_synced' in locals() else False,
+            'sync_message': sync_message if 'sync_message' in locals() else ""
         }
-        
+
         return info
     
     def update_heartbeat(self, user_id: str) -> None:
@@ -366,7 +487,7 @@ class BotService:
         if user.is_running:
             return {
                 'success': False,
-                'message': 'Please stop your bot before changing emulator link.'
+                'message': 'Please stop your miner before changing emulator link.'
             }
         
         # Find emulator by name
@@ -426,7 +547,7 @@ class BotService:
         if user.is_running:
             return {
                 'success': False,
-                'message': 'Please stop your bot before unlinking emulator.'
+                'message': 'Please stop your miner before unlinking emulator.'
             }
         
         old_emulator = user.emulator_name or f"Index {user.emulator_index}"

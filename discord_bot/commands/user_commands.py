@@ -126,7 +126,7 @@ def setup_user_commands(
         
         # Build status embed
         embed = discord.Embed(
-            title="Bot Status",
+            title="Miner Status",
             color=discord.Color.blue()
         )
         
@@ -174,8 +174,16 @@ def setup_user_commands(
             inline=True
         )
         
+        # Add sync notification if state was synchronized
+        if status_info.get('state_synced', False):
+            embed.add_field(
+                name="⚠️ State Synchronization",
+                value=status_info.get('sync_message', 'State was synchronized with GUI.'),
+                inline=False
+            )
+
         embed.timestamp = datetime.utcnow()
-        
+
         await ctx.respond(embed=embed, ephemeral=True)
     
     @bot.slash_command(
@@ -286,100 +294,8 @@ def setup_user_commands(
         
         await ctx.followup.send(result['message'], ephemeral=True)
     
-    @bot.slash_command(
-        name="unlink",
-        description="Unlink your account from current emulator"
-    )
-    async def unlink(ctx: discord.ApplicationContext):
-        """Unlink user from emulator."""
-        # Check if in allowed location
-        allowed, error_msg = in_allowed_channel(ctx)
-        if not allowed:
-            await ctx.respond(error_msg, ephemeral=True)
-            return
+      
         
-        user_id = str(ctx.author.id)
-        
-        # Defer response
-        await ctx.defer(ephemeral=True)
-        
-        # Unlink user
-        result = bot_service.unlink_user_from_emulator(user_id)
-        
-        # Log action
-        data_manager.log_action(
-            user_id=user_id,
-            user_name=str(ctx.author),
-            action=ActionType.CONFIG_CHANGE,
-            details="Unlink from emulator",
-            result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED
-        )
-        
-        await ctx.followup.send(result['message'], ephemeral=True)
-    
-    @bot.slash_command(
-        name="list_emulators",
-        description="View all available emulators"
-    )
-    async def list_emulators(ctx: discord.ApplicationContext):
-        """List all available emulators."""
-        # Check if in allowed location
-        allowed, error_msg = in_allowed_channel(ctx)
-        if not allowed:
-            await ctx.respond(error_msg, ephemeral=True)
-            return
-        
-        # Defer response
-        await ctx.defer(ephemeral=True)
-        
-        # Get emulators
-        result = bot_service.get_available_emulators()
-        
-        if not result['success']:
-            await ctx.followup.send(result['message'], ephemeral=True)
-            return
-        
-        # Build embed
-        embed = discord.Embed(
-            title="Available Emulators",
-            description=f"Total: {result['count']} emulators",
-            color=discord.Color.blue()
-        )
-        
-        # Group emulators
-        linked = []
-        available = []
-        
-        for emu in result['emulators']:
-            status = "[ACTIVE]" if emu['is_active'] else "[INACTIVE]"
-            if emu['linked_user']:
-                linked.append(f"{status} **{emu['name']}** (Index {emu['index']})\n└─ Linked to: {emu['linked_user']}")
-            else:
-                available.append(f"{status} **{emu['name']}** (Index {emu['index']})\n└─ Available")
-        
-        if available:
-            embed.add_field(
-                name=f"Available ({len(available)})",
-                value="\n".join(available[:10]) + ("\n..." if len(available) > 10 else ""),
-                inline=False
-            )
-        
-        if linked:
-            embed.add_field(
-                name=f"Linked ({len(linked)})",
-                value="\n".join(linked[:10]) + ("\n..." if len(linked) > 10 else ""),
-                inline=False
-            )
-        
-        embed.add_field(
-            name="How to Link",
-            value="Use `/link <emulator_name>` to link to an emulator\nExample: `/link RoK-01`",
-            inline=False
-        )
-        
-        embed.timestamp = datetime.utcnow()
-        await ctx.followup.send(embed=embed, ephemeral=True)
-    
     @bot.slash_command(
         name="help",
         description="Bot help and usage guide"
@@ -387,17 +303,17 @@ def setup_user_commands(
     async def help_command(ctx: discord.ApplicationContext):
         """Show help information."""
         embed = discord.Embed(
-            title="WhaleBots Usage Guide",
+            title="Miner Usage Guide",
             description="Game automation bot manager",
             color=discord.Color.blue()
         )
         
         embed.add_field(
-            name="Bot Control",
+            name="Miner Control",
             value=(
-                "`/start` - Start your bot\n"
-                "`/stop` - Stop your bot\n"
-                "`/status` - Check bot status\n"
+                "`/start` - Start your miner\n"
+                "`/stop` - Stop your miner\n"
+                "`/status` - Check miner status\n"
                 "`/expiry` - View subscription info"
             ),
             inline=False
@@ -406,9 +322,8 @@ def setup_user_commands(
         embed.add_field(
             name="Emulator Management",
             value=(
-                "`/list_emulators` - View all emulators\n"
                 "`/link <emulator_name>` - Link to an emulator\n"
-                "`/unlink` - Unlink from current emulator"
+                "Note: Contact admin to unlink from emulator"
             ),
             inline=False
         )
@@ -431,11 +346,26 @@ def setup_user_commands(
         )
         
         embed.add_field(
+            name="Admin Commands",
+            value=(
+                "Admins have additional commands:\n"
+                "• `/grant <user> <days>` - Cấp subscription\n"
+                "• `/link_user <user> <emulator>` - Gắn user vào emulator\n"
+                "• `/unlink_user <user>` - Unlink user khỏi emulator\n"
+                "• `/relink_user <user> <emulator>` - Gắn lại user vào emulator mới\n"
+                "• `/unlink_expired` - Unlink tất cả users đã hết hạn\n"
+                "• `/delete_expired` - Xóa tất cả users đã hết hạn\n"
+                "• `/list_emulators` - View all emulators and their status"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
             name="Support",
             value="Contact server admin for support",
             inline=False
         )
-        
+
         embed.timestamp = datetime.utcnow()
-        
+
         await ctx.respond(embed=embed, ephemeral=True)

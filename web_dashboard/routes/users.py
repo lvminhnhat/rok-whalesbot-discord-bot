@@ -4,6 +4,7 @@ Users management routes for web dashboard.
 
 from flask import Blueprint, jsonify, request, current_app
 from shared.constants import ActionType, ActionResult
+import asyncio
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 
@@ -42,21 +43,42 @@ def start_user(user_id):
     """Start instance for user."""
     bot_service = current_app.bot_service
     data_manager = current_app.data_manager
-    
-    result = bot_service.start_instance(user_id)
-    
+
+    # Handle async function properly
+    try:
+        # Check if start_instance is async
+        if asyncio.iscoroutinefunction(bot_service.start_instance):
+            # Run the coroutine in the event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(bot_service.start_instance(user_id))
+            finally:
+                loop.close()
+        else:
+            # If it's not async, call it normally
+            result = bot_service.start_instance(user_id)
+    except Exception as e:
+        # Handle any exceptions during execution
+        result = {
+            'success': False,
+            'message': f'Error starting instance: {str(e)}'
+        }
+
     # Log action
     user = data_manager.get_user(user_id)
     if user:
+        # Ensure result is a dict before trying to access 'success'
+        success_value = result.get('success', False) if isinstance(result, dict) else False
         data_manager.log_action(
             user_id=user_id,
             user_name=user.discord_name,
             action=ActionType.START,
             details="Started from web dashboard",
-            result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED,
+            result=ActionResult.SUCCESS if success_value else ActionResult.FAILED,
             performed_by="web_admin"
         )
-    
+
     return jsonify(result)
 
 
@@ -65,21 +87,24 @@ def stop_user(user_id):
     """Stop instance for user."""
     bot_service = current_app.bot_service
     data_manager = current_app.data_manager
-    
+
+    # Use force_stop_instance which is not async
     result = bot_service.force_stop_instance(user_id)
-    
+
     # Log action
     user = data_manager.get_user(user_id)
     if user:
+        # Ensure result is a dict before trying to access 'success'
+        success_value = result.get('success', False) if isinstance(result, dict) else False
         data_manager.log_action(
             user_id=user_id,
             user_name=user.discord_name,
             action=ActionType.FORCE_STOP,
             details="Stopped from web dashboard",
-            result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED,
+            result=ActionResult.SUCCESS if success_value else ActionResult.FAILED,
             performed_by="web_admin"
         )
-    
+
     return jsonify(result)
 
 

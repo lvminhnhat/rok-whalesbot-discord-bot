@@ -134,8 +134,21 @@ class QueuedBotService:
         # Create start operation callback
         async def start_operation():
             async with self._ui_lock:
-                # Check actual emulator state before proceeding
-                actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+                try:
+                    actual_emulator_state = await asyncio.wait_for(
+                        asyncio.to_thread(self._get_actual_emulator_state, user.emulator_index),
+                        timeout=10.0
+                    )
+                except asyncio.TimeoutError:
+                    return {
+                        'success': False,
+                        'message': 'Timeout checking emulator state. WhaleBots may not be responding.'
+                    }
+                except Exception as e:
+                    return {
+                        'success': False,
+                        'message': f'Error checking emulator state: {str(e)}'
+                    }
 
                 # Check for state inconsistency
                 if user.is_running and not actual_emulator_state:
@@ -169,9 +182,11 @@ class QueuedBotService:
 
                 # Execute start operation
                 try:
-                    self.whalesbot.start(user.emulator_index)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self.whalesbot.start, user.emulator_index),
+                        timeout=30.0
+                    )
 
-                    # Update user status
                     user.status = InstanceStatus.RUNNING.value
                     user.last_start = datetime.now(pytz.UTC).isoformat()
                     user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
@@ -180,6 +195,14 @@ class QueuedBotService:
                     return {
                         'success': True,
                         'message': f'Miner started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days'
+                    }
+
+                except asyncio.TimeoutError:
+                    user.status = InstanceStatus.ERROR.value
+                    self.data_manager.save_user(user)
+                    return {
+                        'success': False,
+                        'message': 'Timeout starting miner. WhaleBots may not be responding.'
                     }
 
                 except EmulatorAlreadyRunningError:
@@ -259,8 +282,21 @@ class QueuedBotService:
         # Create stop operation callback
         async def stop_operation():
             async with self._ui_lock:
-                # Check actual emulator state before proceeding
-                actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+                try:
+                    actual_emulator_state = await asyncio.wait_for(
+                        asyncio.to_thread(self._get_actual_emulator_state, user.emulator_index),
+                        timeout=10.0
+                    )
+                except asyncio.TimeoutError:
+                    return {
+                        'success': False,
+                        'message': 'Timeout checking emulator state. WhaleBots may not be responding.'
+                    }
+                except Exception as e:
+                    return {
+                        'success': False,
+                        'message': f'Error checking emulator state: {str(e)}'
+                    }
 
                 # Check for state inconsistency
                 if user.is_running and not actual_emulator_state:
@@ -290,9 +326,11 @@ class QueuedBotService:
 
                 # Execute stop operation
                 try:
-                    self.whalesbot.stop(user.emulator_index)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
+                        timeout=30.0
+                    )
 
-                    # Update user status
                     user.status = InstanceStatus.STOPPED.value
                     user.last_stop = datetime.now(pytz.UTC).isoformat()
                     self.data_manager.save_user(user)
@@ -306,6 +344,14 @@ class QueuedBotService:
                     return {
                         'success': True,
                         'message': f'Miner stopped successfully!{uptime_text}'
+                    }
+
+                except asyncio.TimeoutError:
+                    user.status = InstanceStatus.ERROR.value
+                    self.data_manager.save_user(user)
+                    return {
+                        'success': False,
+                        'message': 'Timeout stopping miner. WhaleBots may not be responding.'
                     }
 
                 except EmulatorNotRunningError:
@@ -354,16 +400,7 @@ class QueuedBotService:
                 'message': f'Operation failed: {result.error or "Unknown error"}'
             }
 
-    def get_status(self, user_id: str) -> Dict[str, Any]:
-        """
-        Get bot status for user (non-blocking, no queue needed).
-
-        Args:
-            user_id: Discord user ID
-
-        Returns:
-            Status dictionary
-        """
+    async def get_status(self, user_id: str) -> Dict[str, Any]:
         user = self.data_manager.get_user(user_id)
         if not user:
             return {
@@ -371,7 +408,6 @@ class QueuedBotService:
                 'message': "You don't have access."
             }
 
-        # Check if user has operations in queue
         pending_ops = self.operation_queue.get_pending_operations()
         user_pending_ops = [op for op in pending_ops if op['user_name'] == user.discord_name]
 
@@ -383,30 +419,36 @@ class QueuedBotService:
                 'operation_type': user_pending_ops[0]['operation_type']
             }
 
-        # Check actual emulator state and sync if needed
+        state_synced = False
+        sync_message = ""
+        
         if user.emulator_index != -1:
-            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+            try:
+                actual_emulator_state = await asyncio.wait_for(
+                    asyncio.to_thread(self._get_actual_emulator_state, user.emulator_index),
+                    timeout=10.0
+                )
 
-            # Auto-sync state if inconsistency detected
-            state_synced = False
-            sync_message = ""
+                if user.is_running and not actual_emulator_state:
+                    print(f"[SYNC] Status check: User {user.discord_name} database says RUNNING but emulator is STOPPED. Auto-syncing...")
+                    user.status = InstanceStatus.STOPPED.value
+                    user.last_stop = datetime.now(pytz.UTC).isoformat()
+                    self.data_manager.save_user(user)
+                    state_synced = True
+                    sync_message = " (State auto-synchronized: was stopped outside Discord)"
 
-            if user.is_running and not actual_emulator_state:
-                print(f"[SYNC] Status check: User {user.discord_name} database says RUNNING but emulator is STOPPED. Auto-syncing...")
-                user.status = InstanceStatus.STOPPED.value
-                user.last_stop = datetime.now(pytz.UTC).isoformat()
-                self.data_manager.save_user(user)
-                state_synced = True
-                sync_message = " (State auto-synchronized: was stopped outside Discord)"
-
-            elif not user.is_running and actual_emulator_state:
-                print(f"[SYNC] Status check: User {user.discord_name} database says STOPPED but emulator is RUNNING. Auto-syncing...")
-                user.status = InstanceStatus.RUNNING.value
-                user.last_start = datetime.now(pytz.UTC).isoformat()
-                user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
-                self.data_manager.save_user(user)
-                state_synced = True
-                sync_message = " (State auto-synchronized: was started outside Discord)"
+                elif not user.is_running and actual_emulator_state:
+                    print(f"[SYNC] Status check: User {user.discord_name} database says STOPPED but emulator is RUNNING. Auto-syncing...")
+                    user.status = InstanceStatus.RUNNING.value
+                    user.last_start = datetime.now(pytz.UTC).isoformat()
+                    user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
+                    self.data_manager.save_user(user)
+                    state_synced = True
+                    sync_message = " (State auto-synchronized: was started outside Discord)"
+            except asyncio.TimeoutError:
+                print(f"[WARN] Timeout checking emulator state for status, using cached state")
+            except Exception as e:
+                print(f"[WARN] Error checking emulator state for status: {e}")
 
         # Build status message
         status_symbols = {
@@ -463,7 +505,10 @@ class QueuedBotService:
             async with self._ui_lock:
                 try:
                     if user.is_running:
-                        self.whalesbot.stop(user.emulator_index)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
+                            timeout=30.0
+                        )
 
                     user.status = InstanceStatus.STOPPED.value
                     user.last_stop = datetime.now(pytz.UTC).isoformat()
@@ -472,6 +517,14 @@ class QueuedBotService:
                     return {
                         'success': True,
                         'message': f'Force stopped bot for {user.discord_name}'
+                    }
+
+                except asyncio.TimeoutError:
+                    user.status = InstanceStatus.ERROR.value
+                    self.data_manager.save_user(user)
+                    return {
+                        'success': False,
+                        'message': 'Timeout stopping miner. WhaleBots may not be responding.'
                     }
 
                 except Exception as e:

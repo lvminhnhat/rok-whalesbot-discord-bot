@@ -113,11 +113,12 @@ class BotService:
         if self.use_queue and self.operation_queue:
             return await self._queued_start_instance(user)
 
-        # Check actual emulator state before proceeding
         try:
-            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+            actual_emulator_state = await asyncio.wait_for(
+                asyncio.to_thread(self._get_actual_emulator_state, user.emulator_index),
+                timeout=10.0
+            )
 
-            # Check if database says running but emulator is actually stopped (GUI stop scenario)
             if user.is_running and not actual_emulator_state:
                 print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing state...")
                 user.status = InstanceStatus.STOPPED.value
@@ -128,14 +129,12 @@ class BotService:
                     'message': 'Detected state inconsistency. Your miner was stopped outside Discord. Status has been synchronized. Please try starting again.'
                 }
 
-            # Check if already running (both database and actual state agree)
             if user.is_running and actual_emulator_state:
                 return {
                     'success': False,
                     'message': 'Your miner is already running.'
                 }
 
-            # Check if emulator is actually running but database says stopped (GUI start scenario)
             if not user.is_running and actual_emulator_state:
                 print(f"[SYNC] User {user.discord_name} database says STOPPED but emulator is RUNNING. Syncing state...")
                 user.status = InstanceStatus.RUNNING.value
@@ -146,19 +145,25 @@ class BotService:
                     'success': False,
                     'message': 'Detected state inconsistency. Your miner was started outside Discord. Status has been synchronized. Use /status to check current state.'
                 }
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Timeout checking emulator state for user {user.discord_name}")
+            return {
+                'success': False,
+                'message': 'Timeout checking emulator state. WhaleBots may not be responding. Please try again.'
+            }
         except Exception as e:
             print(f"[ERROR] Failed to check emulator state for user {user.discord_name}: {e}")
-            # Continue with start attempt but warn about potential issues
             return {
                 'success': False,
                 'message': f'Unable to verify emulator state. Please try again. Error: {str(e)}'
             }
         
-        # Try to start
         try:
-            self.whalesbot.start(user.emulator_index)
+            await asyncio.wait_for(
+                asyncio.to_thread(self.whalesbot.start, user.emulator_index),
+                timeout=30.0
+            )
             
-            # Update user status
             user.status = InstanceStatus.RUNNING.value
             user.last_start = datetime.now(pytz.UTC).isoformat()
             user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
@@ -167,6 +172,15 @@ class BotService:
             return {
                 'success': True,
                 'message': 'Miner started succesfully!\nPls wait 45 seconds for the Miner to run.\nDo not send any more orders for about 2 minutes.\nTime left: ...'
+            }
+        
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Timeout starting emulator for user {user.discord_name}")
+            user.status = InstanceStatus.ERROR.value
+            self.data_manager.save_user(user)
+            return {
+                'success': False,
+                'message': 'Timeout starting miner. WhaleBots window may not be responding. Please check manually.'
             }
             
         except EmulatorAlreadyRunningError:
@@ -215,9 +229,12 @@ class BotService:
         if self.use_queue and self.operation_queue:
             return await self._queued_stop_instance(user)
 
-        # Check actual emulator state before proceeding
+        # Check actual emulator state before proceeding (run in thread to avoid blocking)
         try:
-            actual_emulator_state = self._get_actual_emulator_state(user.emulator_index)
+            actual_emulator_state = await asyncio.wait_for(
+                asyncio.to_thread(self._get_actual_emulator_state, user.emulator_index),
+                timeout=10.0
+            )
 
             # Check if database says running but emulator is actually stopped (GUI stop scenario)
             if user.is_running and not actual_emulator_state:
@@ -246,6 +263,12 @@ class BotService:
                     'success': False,
                     'message': 'Your miner is not running.'
                 }
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Timeout checking emulator state for user {user.discord_name}")
+            return {
+                'success': False,
+                'message': 'Timeout checking emulator state. WhaleBots may not be responding. Please try again.'
+            }
         except Exception as e:
             print(f"[ERROR] Failed to check emulator state for user {user.discord_name} during stop: {e}")
             # Continue with stop attempt but warn about potential issues
@@ -254,9 +277,12 @@ class BotService:
                 'message': f'Unable to verify emulator state. Please try again. Error: {str(e)}'
             }
         
-        # Try to stop
+        # Try to stop (run in thread to avoid blocking Discord event loop)
         try:
-            self.whalesbot.stop(user.emulator_index)
+            await asyncio.wait_for(
+                asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
+                timeout=30.0
+            )
             
             # Update user status
             user.status = InstanceStatus.STOPPED.value
@@ -272,6 +298,15 @@ class BotService:
             return {
                 'success': True,
                 'message': 'Miner is sending stop command, please wait 1 minute then login, thank you!'
+            }
+        
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Timeout stopping emulator for user {user.discord_name}")
+            user.status = InstanceStatus.ERROR.value
+            self.data_manager.save_user(user)
+            return {
+                'success': False,
+                'message': 'Timeout stopping miner. WhaleBots window may not be responding. Please check manually.'
             }
             
         except EmulatorNotRunningError:
@@ -386,16 +421,7 @@ class BotService:
             user.last_heartbeat = datetime.now(pytz.UTC).isoformat()
             self.data_manager.save_user(user)
     
-    def force_stop_instance(self, user_id: str) -> Dict[str, Any]:
-        """
-        Force stop instance (for admin use).
-        
-        Args:
-            user_id: Discord user ID
-            
-        Returns:
-            Result dictionary
-        """
+    async def force_stop_instance(self, user_id: str) -> Dict[str, Any]:
         user = self.data_manager.get_user(user_id)
         if not user:
             return {
@@ -405,7 +431,10 @@ class BotService:
         
         try:
             if user.is_running:
-                self.whalesbot.stop(user.emulator_index)
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
+                    timeout=30.0
+                )
             
             user.status = InstanceStatus.STOPPED.value
             user.last_stop = datetime.now(pytz.UTC).isoformat()
@@ -415,11 +444,19 @@ class BotService:
                 'success': True,
                 'message': f'Force stopped bot for {user.discord_name}'
             }
+        
+        except asyncio.TimeoutError:
+            user.status = InstanceStatus.ERROR.value
+            self.data_manager.save_user(user)
+            return {
+                'success': False,
+                'message': 'Timeout stopping miner. WhaleBots may not be responding.'
+            }
             
         except Exception as e:
             return {
                 'success': False,
-                'message': f'❌ Lỗi: {str(e)}'
+                'message': f'Error: {str(e)}'
             }
     
     def get_available_emulators(self) -> Dict[str, Any]:

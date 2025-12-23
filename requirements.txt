@@ -1,45 +1,48 @@
 # Core Dependencies
-#discord.py==2.6.4
+py-cord>=2.6.0
 Flask>=2.0.0
 python-dotenv>=1.0.0
 
-# Automation & GUI
-PyAutoGUI>=0.9.53
-PyGetWindow>=0.0.9
-PyMsgBox>=2.0.1
-PyRect>=0.2.0
-PyScreeze>=1.0.1
-pytweening>=1.2.0
-pywinauto==0.6.9
-MouseInfo==0.1.3
-pyperclip==1.11.0
-
-# Computer Vision & Image Processing
-opencv-python==4.12.0.88
-pillow>=10.0.0
-pytesseract>=0.3.10
-numpy>=1.21.0,<2.0.0
-
-# System Integration
-pywin32==305
+# Windows System Integration
+pywin32>=305
 psutil>=5.8.0
 
-# Development & Logging
-colorlog==6.10.1
-colorama==0.4.6
-mypy>=1.0.0
-typing_extensions>=4.0.0
-
-# Timezone & Utilities
+# Timezone
 pytz>=2023.3
-six>=1.16.0
-
-# Optional Dependencies
-# discord.py alternative (choose one)
-py-cord==2.6.1
 
 # Development Dependencies (uncomment if needed)
 # pytest>=7.0.0
 # pytest-asyncio>=0.21.0
 # black>=23.0.0
 # flake8>=6.0.0
+# mypy>=1.0.0
+
+# ============================================
+# UNUSED PACKAGES (removed from active deps)
+# ============================================
+# The following were previously listed but NOT imported in the codebase:
+#
+# GUI Automation (not currently used):
+# PyAutoGUI>=0.9.53
+# PyGetWindow>=0.0.9
+# PyMsgBox>=2.0.1
+# PyRect>=0.2.0
+# PyScreeze>=1.0.1
+# pytweening>=1.2.0
+# pywinauto==0.6.9
+# MouseInfo==0.1.3
+# pyperclip==1.11.0
+#
+# Computer Vision (not currently used):
+# opencv-python==4.12.0.88
+# pillow>=10.0.0
+# pytesseract>=0.3.10
+# numpy>=1.21.0,<2.0.0
+#
+# Logging/Coloring (not currently used):
+# colorlog==6.10.1
+# colorama==0.4.6
+#
+# Utilities (not currently used):
+# six>=1.16.0
+# typing_extensions>=4.0.0

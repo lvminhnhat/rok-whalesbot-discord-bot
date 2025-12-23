@@ -160,7 +160,7 @@ def setup_queued_user_commands(
 
         user_id = str(ctx.author.id)
 
-        status_info = bot_service.get_status(user_id)
+        status_info = await bot_service.get_status(user_id)
 
         if not status_info['exists']:
             await ctx.respond(status_info['message'], ephemeral=True)

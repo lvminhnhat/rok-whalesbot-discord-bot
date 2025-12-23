@@ -33,12 +33,12 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="grant",
-        description="[Admin] Cấp quyền sử dụng cho user"
+        description="[Admin] Grant access to user"
     )
     async def grant(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần cấp quyền", required=True),
-        days: Option(int, "Số days sử dụng", required=True)
+        user: Option(discord.Member, "User to grant access", required=True),
+        days: Option(int, "Number of days", required=True)
     ):
         """Grant subscription to user."""
         if not is_admin(ctx):
@@ -73,12 +73,12 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="add_days",
-        description="[Admin] Thêm days sử dụng cho user"
+        description="[Admin] Add days to user subscription"
     )
     async def add_days(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần thêm days", required=True),
-        days: Option(int, "Số days cần thêm", required=True)
+        user: Option(discord.Member, "User to add days", required=True),
+        days: Option(int, "Number of days to add", required=True)
     ):
         """Add days to user's subscription."""
         if not is_admin(ctx):
@@ -107,12 +107,12 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="set_expiry",
-        description="[Admin] Đặt days hết hạn cho user"
+        description="[Admin] Set expiry date for user"
     )
     async def set_expiry(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần đặt hạn", required=True),
-        date: Option(str, "Ngày hết hạn (YYYY-MM-DD)", required=True)
+        user: Option(discord.Member, "User to set expiry", required=True),
+        date: Option(str, "Expiry date (YYYY-MM-DD)", required=True)
     ):
         """Set expiry date for user."""
         if not is_admin(ctx):
@@ -141,11 +141,11 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="revoke",
-        description="[Admin] Thu hồi quyền sử dụng của user"
+        description="[Admin] Revoke user access"
     )
     async def revoke(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần thu hồi", required=True)
+        user: Option(discord.Member, "User to revoke", required=True)
     ):
         """Revoke user's subscription."""
         if not is_admin(ctx):
@@ -174,11 +174,11 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="force_start",
-        description="[Admin] Bật bot thay cho user"
+        description="[Admin] Force start bot for user"
     )
     async def force_start(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần bật bot", required=True)
+        user: Option(discord.Member, "User to start bot for", required=True)
     ):
         """Force start user's instance."""
         if not is_admin(ctx):
@@ -203,11 +203,11 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="force_stop",
-        description="[Admin] Dừng bot thay cho user"
+        description="[Admin] Force stop bot for user"
     )
     async def force_stop(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần dừng bot", required=True)
+        user: Option(discord.Member, "User to stop bot for", required=True)
     ):
         """Force stop user's instance."""
         if not is_admin(ctx):
@@ -232,11 +232,11 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="list_expiring",
-        description="[Admin] Liệt kê user sắp hết hạn"
+        description="[Admin] List users expiring soon"
     )
     async def list_expiring(
         ctx: discord.ApplicationContext,
-        days: Option(int, "Số days (mặc định 7)", required=False, default=7)
+        days: Option(int, "Number of days (default 7)", required=False, default=7)
     ):
         """List users expiring soon."""
         if not is_admin(ctx):
@@ -246,7 +246,7 @@ def setup_admin_commands(
         expiring_users = subscription_service.get_expiring_users(days)
         
         if not expiring_users:
-            await ctx.respond(f"✅ Không có user nào hết hạn trong {days} days tới.", ephemeral=True)
+            await ctx.respond(f"No users expiring in the next {days} days.", ephemeral=True)
             return
         
         embed = discord.Embed(
@@ -254,15 +254,15 @@ def setup_admin_commands(
             color=discord.Color.orange()
         )
         
-        for user in expiring_users[:25]:  # Limit to 25 fields
+        for user in expiring_users[:25]:
             embed.add_field(
                 name=user.discord_name,
-                value=f"Còn {user.subscription.days_left} days\nEmulator: #{user.emulator_index}",
+                value=f"{user.subscription.days_left} days left\nEmulator: #{user.emulator_index}",
                 inline=True
             )
         
         if len(expiring_users) > 25:
-            embed.set_footer(text=f"Và {len(expiring_users) - 25} user khác...")
+            embed.set_footer(text=f"And {len(expiring_users) - 25} more users...")
         
         embed.timestamp = datetime.utcnow()
         
@@ -270,7 +270,7 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="who",
-        description="[Admin] Xem danh sách đang chạy"
+        description="[Admin] View running instances"
     )
     async def who(ctx: discord.ApplicationContext):
         """List running instances."""
@@ -303,9 +303,9 @@ def setup_admin_commands(
             )
         
         if len(running_users) > 25:
-            embed.set_footer(text=f"Và {len(running_users) - 25} instance khác...")
+            embed.set_footer(text=f"And {len(running_users) - 25} more instances...")
         else:
-            embed.set_footer(text=f"Tổng: {len(running_users)} instances")
+            embed.set_footer(text=f"Total: {len(running_users)} instances")
         
         embed.timestamp = datetime.utcnow()
         
@@ -447,12 +447,12 @@ def setup_admin_commands(
     
     @bot.slash_command(
         name="logs",
-        description="[Admin] Xem audit logs"
+        description="[Admin] View audit logs"
     )
     async def logs(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "Lọc theo user (tùy chọn)", required=False, default=None),
-        limit: Option(int, "Số lượng logs (mặc định 20)", required=False, default=20)
+        user: Option(discord.Member, "Filter by user (optional)", required=False, default=None),
+        limit: Option(int, "Number of logs (default 20)", required=False, default=20)
     ):
         """View audit logs."""
         if not is_admin(ctx):
@@ -472,9 +472,9 @@ def setup_admin_commands(
         )
         
         if user:
-            embed.description = f"Logs của {user.mention}"
+            embed.description = f"Logs for {user.mention}"
         
-        for log in logs[:10]:  # Show max 10 in embed
+        for log in logs[:10]:
             try:
                 timestamp = datetime.fromisoformat(log.timestamp)
                 time_str = f"<t:{int(timestamp.timestamp())}:R>"
@@ -490,7 +490,7 @@ def setup_admin_commands(
             )
         
         if len(logs) > 10:
-            embed.set_footer(text=f"Hiển thị 10/{len(logs)} logs")
+            embed.set_footer(text=f"Showing 10/{len(logs)} logs")
         
         embed.timestamp = datetime.utcnow()
         
@@ -498,12 +498,12 @@ def setup_admin_commands(
 
     @bot.slash_command(
         name="link_user",
-        description="[Admin] Gắn user vào emulator"
+        description="[Admin] Link user to emulator"
     )
     async def link_user(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần gắn", required=True),
-        emulator_name: Option(str, "Tên emulator để gắn", required=True)
+        user: Option(discord.Member, "User to link", required=True),
+        emulator_name: Option(str, "Emulator name to link", required=True)
     ):
         """Link user to emulator (admin command)."""
         if not is_admin(ctx):
@@ -515,14 +515,13 @@ def setup_admin_commands(
         # Check if user exists
         existing_user = data_manager.get_user(str(user.id))
         if not existing_user:
-            await ctx.followup.send("User chưa có trong hệ thống. Sử dụng `/grant` để cấp quyền trước.", ephemeral=True)
+            await ctx.followup.send("User not in system. Use `/grant` to grant access first.", ephemeral=True)
             return
 
-        # Force stop if running
         if existing_user.is_running:
             stop_result = bot_service.force_stop_instance(str(user.id))
             if not stop_result['success']:
-                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                await ctx.followup.send(f"Cannot stop current bot: {stop_result['message']}", ephemeral=True)
                 return
 
         # Link user to emulator
@@ -544,12 +543,12 @@ def setup_admin_commands(
         )
 
         if link_result['success']:
-            message = f"✅ **Gắn user thành công!**\n\n"
+            message = f"**User linked successfully!**\n\n"
             message += f"**User:** {user.mention}\n"
             message += f"**Emulator:** {emulator_name}\n\n"
-            message += f"User có thể sử dụng `/start` ngay."
+            message += f"User can now use `/start`."
         else:
-            message = f"❌ **Gắn user thất bại:** {link_result['message']}"
+            message = f"**Link failed:** {link_result['message']}"
 
         await ctx.followup.send(message, ephemeral=True)
 
@@ -606,18 +605,18 @@ def setup_admin_commands(
             )
 
         embed.add_field(
-            name="📋 Admin Commands",
+            name="Admin Commands",
             value=(
-                "• `/link_user <user> <emulator>` - Gắn user vào emulator\n"
-                "• `/relink_user <user> <emulator>` - Gắn lại user vào emulator mới\n"
-                "• `/grant <user> <days>` - Cấp subscription"
+                "• `/link_user <user> <emulator>` - Link user to emulator\n"
+                "• `/relink_user <user> <emulator>` - Relink user to new emulator\n"
+                "• `/grant <user> <days>` - Grant subscription"
             ),
             inline=False
         )
 
         embed.add_field(
-            name="📝 Note",
-            value="User sẽ dùng `/link <emulator_name>` để tự gắn vào emulator",
+            name="Note",
+            value="Users use `/link <emulator_name>` to link themselves to an emulator",
             inline=False
         )
 
@@ -627,12 +626,12 @@ def setup_admin_commands(
 
     @bot.slash_command(
         name="relink_user",
-        description="[Admin] Gắn lại user vào emulator mới"
+        description="[Admin] Relink user to different emulator"
     )
     async def relink_user(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần gắn lại", required=True),
-        emulator_name: Option(str, "Tên emulator mới", required=True)
+        user: Option(discord.Member, "User to relink", required=True),
+        emulator_name: Option(str, "New emulator name", required=True)
     ):
         """Relink user to different emulator."""
         if not is_admin(ctx):
@@ -644,14 +643,13 @@ def setup_admin_commands(
         # Get current user info
         current_user = data_manager.get_user(str(user.id))
         if not current_user:
-            await ctx.followup.send("User chưa có trong hệ thống. Sử dụng `/grant_access` để cấp quyền.", ephemeral=True)
+            await ctx.followup.send("User not in system. Use `/grant` to grant access first.", ephemeral=True)
             return
 
-        # Force stop if running
         if current_user.is_running:
             stop_result = bot_service.force_stop_instance(str(user.id))
             if not stop_result['success']:
-                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                await ctx.followup.send(f"Cannot stop current bot: {stop_result['message']}", ephemeral=True)
                 return
 
         # Link to new emulator
@@ -673,13 +671,13 @@ def setup_admin_commands(
         )
 
         if link_result['success']:
-            message = f"✅ **Gắn lại thành công!**\n\n"
+            message = f"**Relink successful!**\n\n"
             message += f"**User:** {user.mention}\n"
-            message += f"**Từ:** {old_emulator}\n"
-            message += f"**Đến:** {emulator_name}\n\n"
-            message += f"User có thể sử dụng `/start` ngay."
+            message += f"**From:** {old_emulator}\n"
+            message += f"**To:** {emulator_name}\n\n"
+            message += f"User can now use `/start`."
         else:
-            message = f"❌ **Gắn lại thất bại:** {link_result['message']}"
+            message = f"**Relink failed:** {link_result['message']}"
 
         await ctx.followup.send(message, ephemeral=True)
 
@@ -689,7 +687,7 @@ def setup_admin_commands(
     )
     async def unlink_user(
         ctx: discord.ApplicationContext,
-        user: Option(discord.Member, "User cần unlink", required=True)
+        user: Option(discord.Member, "User to unlink", required=True)
     ):
         """Unlink user from emulator (admin command)."""
         if not is_admin(ctx):
@@ -701,14 +699,13 @@ def setup_admin_commands(
         # Get current user info
         current_user = data_manager.get_user(str(user.id))
         if not current_user:
-            await ctx.followup.send("User không tồn tại trong hệ thống.", ephemeral=True)
+            await ctx.followup.send("User not found in system.", ephemeral=True)
             return
 
-        # Force stop if running
         if current_user.is_running:
             stop_result = bot_service.force_stop_instance(str(user.id))
             if not stop_result['success']:
-                await ctx.followup.send(f"Không thể dừng bot hiện tại: {stop_result['message']}", ephemeral=True)
+                await ctx.followup.send(f"Cannot stop current bot: {stop_result['message']}", ephemeral=True)
                 return
 
         # Unlink user
@@ -726,18 +723,18 @@ def setup_admin_commands(
         )
 
         if unlink_result['success']:
-            message = f"✅ **Unlink thành công!**\n\n"
+            message = f"**Unlink successful!**\n\n"
             message += f"**User:** {user.mention}\n"
-            message += f"**Đã unlink từ:** {old_emulator}\n\n"
-            message += f"User cần được linked lại để sử dụng bot."
+            message += f"**Unlinked from:** {old_emulator}\n\n"
+            message += f"User needs to be linked again to use the bot."
         else:
-            message = f"❌ **Unlink thất bại:** {unlink_result['message']}"
+            message = f"**Unlink failed:** {unlink_result['message']}"
 
         await ctx.followup.send(message, ephemeral=True)
 
     @bot.slash_command(
         name="unlink_expired",
-        description="[Admin] Unlink tất cả users đã hết hạn"
+        description="[Admin] Unlink all expired users"
     )
     async def unlink_expired(ctx: discord.ApplicationContext):
         """Unlink all expired users."""
@@ -752,7 +749,7 @@ def setup_admin_commands(
         expired_users = [u for u in all_users if u.subscription.is_expired and u.emulator_index != -1]
 
         if not expired_users:
-            await ctx.followup.send("Không có user nào đã hết hạn đang linked to emulator.", ephemeral=True)
+            await ctx.followup.send("No expired users currently linked to emulators.", ephemeral=True)
             return
 
         success_count = 0
@@ -761,25 +758,23 @@ def setup_admin_commands(
 
         for user in expired_users:
             try:
-                # Force stop if running
                 if user.is_running:
                     stop_result = bot_service.force_stop_instance(str(user.discord_id))
                     if not stop_result['success']:
                         error_count += 1
-                        details.append(f"❌ {user.discord_name}: Không thể dừng bot")
+                        details.append(f"Failed {user.discord_name}: Cannot stop bot")
                         continue
 
-                # Unlink user
                 unlink_result = bot_service.unlink_user_from_emulator(str(user.discord_id))
                 if unlink_result['success']:
                     success_count += 1
-                    details.append(f"✅ {user.discord_name}: Unlinked from {user.emulator_name or f'Index {user.emulator_index}'}")
+                    details.append(f"OK {user.discord_name}: Unlinked from {user.emulator_name or f'Index {user.emulator_index}'}")
                 else:
                     error_count += 1
-                    details.append(f"❌ {user.discord_name}: {unlink_result['message']}")
+                    details.append(f"Failed {user.discord_name}: {unlink_result['message']}")
             except Exception as e:
                 error_count += 1
-                details.append(f"❌ {user.discord_name}: Error - {str(e)}")
+                details.append(f"Failed {user.discord_name}: Error - {str(e)}")
 
         # Log action
         data_manager.log_action(
@@ -791,23 +786,21 @@ def setup_admin_commands(
             performed_by=str(ctx.author.id)
         )
 
-        # Build response message
-        message = f"🔄 **Bulk Unlink Expired Users Complete**\n\n"
-        message += f"**Tổng cộng:** {len(expired_users)} users\n"
-        message += f"**Thành công:** {success_count} users\n"
-        message += f"**Lỗi:** {error_count} users\n\n"
+        message = f"**Bulk Unlink Expired Users Complete**\n\n"
+        message += f"**Total:** {len(expired_users)} users\n"
+        message += f"**Success:** {success_count} users\n"
+        message += f"**Errors:** {error_count} users\n\n"
 
-        # Show first 10 details
-        message += "**Chi tiết:**\n"
+        message += "**Details:**\n"
         message += "\n".join(details[:10])
         if len(details) > 10:
-            message += f"\n... và {len(details) - 10} kết quả khác."
+            message += f"\n... and {len(details) - 10} more results."
 
         await ctx.followup.send(message, ephemeral=True)
 
     @bot.slash_command(
         name="delete_expired",
-        description="[Admin] Xóa tất cả users đã hết hạn"
+        description="[Admin] Delete all expired users"
     )
     async def delete_expired(ctx: discord.ApplicationContext):
         """Delete all expired users from system."""
@@ -822,13 +815,12 @@ def setup_admin_commands(
         expired_users = [u for u in all_users if u.subscription.is_expired]
 
         if not expired_users:
-            await ctx.followup.send("Không có user nào đã hết hạn để xóa.", ephemeral=True)
+            await ctx.followup.send("No expired users to delete.", ephemeral=True)
             return
 
-        # Confirm with user
         await ctx.followup.send(
-            f"⚠️ **Cảnh báo:** Sẽ xóa {len(expired_users)} users đã hết hạn.\n"
-            f"Hành động này không thể hoàn tác. Reply 'confirm' để tiếp tục.",
+            f"**Warning:** Will delete {len(expired_users)} expired users.\n"
+            f"This action cannot be undone. Reply 'confirm' to proceed.",
             ephemeral=True
         )
 
@@ -841,20 +833,18 @@ def setup_admin_commands(
 
         for user in expired_users:
             try:
-                # Force stop if running
                 if user.is_running:
                     bot_service.force_stop_instance(str(user.discord_id))
 
-                # Delete user
                 if data_manager.delete_user(str(user.discord_id)):
                     success_count += 1
-                    details.append(f"✅ {user.discord_name}: Đã xóa")
+                    details.append(f"OK {user.discord_name}: Deleted")
                 else:
                     error_count += 1
-                    details.append(f"❌ {user.discord_name}: Không thể xóa")
+                    details.append(f"Failed {user.discord_name}: Cannot delete")
             except Exception as e:
                 error_count += 1
-                details.append(f"❌ {user.discord_name}: Error - {str(e)}")
+                details.append(f"Failed {user.discord_name}: Error - {str(e)}")
 
         # Log action
         data_manager.log_action(
@@ -866,17 +856,15 @@ def setup_admin_commands(
             performed_by=str(ctx.author.id)
         )
 
-        # Build response message
-        message = f"🗑️ **Bulk Delete Expired Users Complete**\n\n"
-        message += f"**Tổng cộng:** {len(expired_users)} users\n"
-        message += f"**Đã xóa:** {success_count} users\n"
-        message += f"**Lỗi:** {error_count} users\n\n"
+        message = f"**Bulk Delete Expired Users Complete**\n\n"
+        message += f"**Total:** {len(expired_users)} users\n"
+        message += f"**Deleted:** {success_count} users\n"
+        message += f"**Errors:** {error_count} users\n\n"
 
-        # Show first 10 details
-        message += "**Chi tiết:**\n"
+        message += "**Details:**\n"
         message += "\n".join(details[:10])
         if len(details) > 10:
-            message += f"\n... và {len(details) - 10} kết quả khác."
+            message += f"\n... and {len(details) - 10} more results."
 
         await ctx.followup.send(message, ephemeral=True)
 

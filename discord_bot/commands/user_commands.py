@@ -249,7 +249,7 @@ def setup_user_commands(
                     inline=False
                 )
         except:
-            embed.description = "Có lỗi khi hiển thị thông tin subscription."
+            embed.description = "Error displaying subscription information."
         
         embed.timestamp = datetime.utcnow()
         embed.set_footer(text=f"User ID: {user_id}")
@@ -349,12 +349,12 @@ def setup_user_commands(
             name="Admin Commands",
             value=(
                 "Admins have additional commands:\n"
-                "• `/grant <user> <days>` - Cấp subscription\n"
-                "• `/link_user <user> <emulator>` - Gắn user vào emulator\n"
-                "• `/unlink_user <user>` - Unlink user khỏi emulator\n"
-                "• `/relink_user <user> <emulator>` - Gắn lại user vào emulator mới\n"
-                "• `/unlink_expired` - Unlink tất cả users đã hết hạn\n"
-                "• `/delete_expired` - Xóa tất cả users đã hết hạn\n"
+                "• `/grant <user> <days>` - Grant subscription\n"
+                "• `/link_user <user> <emulator>` - Link user to emulator\n"
+                "• `/unlink_user <user>` - Unlink user from emulator\n"
+                "• `/relink_user <user> <emulator>` - Relink user to new emulator\n"
+                "• `/unlink_expired` - Unlink all expired users\n"
+                "• `/delete_expired` - Delete all expired users\n"
                 "• `/list_emulators` - View all emulators and their status"
             ),
             inline=False

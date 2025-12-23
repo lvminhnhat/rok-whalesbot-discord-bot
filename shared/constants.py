@@ -57,4 +57,5 @@ DATA_DIR = "data"
 USERS_FILE = "users.json"
 CONFIG_FILE = "config.json"
 AUDIT_LOGS_FILE = "audit_logs.json"
+COOLDOWNS_FILE = "cooldowns.json"
 

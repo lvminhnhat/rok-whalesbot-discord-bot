@@ -4,12 +4,14 @@ Users management routes for web dashboard.
 
 from flask import Blueprint, jsonify, request, current_app
 from shared.constants import ActionType, ActionResult
+from web_dashboard.rate_limiter import rate_limit, rate_limit_strict
 import asyncio
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 
 
 @users_bp.route('', methods=['GET'])
+@rate_limit(max_requests=120, window_seconds=60)
 def get_users():
     """Get all users with optional filtering."""
     data_manager = current_app.data_manager
@@ -39,6 +41,7 @@ def get_users():
 
 
 @users_bp.route('/<user_id>/start', methods=['POST'])
+@rate_limit_strict(max_requests=10, window_seconds=60)
 def start_user(user_id):
     """Start instance for user."""
     bot_service = current_app.bot_service
@@ -83,6 +86,7 @@ def start_user(user_id):
 
 
 @users_bp.route('/<user_id>/stop', methods=['POST'])
+@rate_limit_strict(max_requests=10, window_seconds=60)
 def stop_user(user_id):
     """Stop instance for user."""
     bot_service = current_app.bot_service
@@ -109,6 +113,7 @@ def stop_user(user_id):
 
 
 @users_bp.route('/<user_id>/add_days', methods=['POST'])
+@rate_limit(max_requests=30, window_seconds=60)
 def add_days(user_id):
     """Add days to user subscription."""
     subscription_service = current_app.subscription_service
@@ -138,6 +143,7 @@ def add_days(user_id):
 
 
 @users_bp.route('/<user_id>/set_expiry', methods=['POST'])
+@rate_limit(max_requests=30, window_seconds=60)
 def set_expiry(user_id):
     """Set expiry date for user."""
     subscription_service = current_app.subscription_service
@@ -167,6 +173,7 @@ def set_expiry(user_id):
 
 
 @users_bp.route('/<user_id>/revoke', methods=['POST'])
+@rate_limit_strict(max_requests=10, window_seconds=60)
 def revoke_user(user_id):
     """Revoke user subscription."""
     subscription_service = current_app.subscription_service
@@ -195,6 +202,7 @@ def revoke_user(user_id):
 
 
 @users_bp.route('/<user_id>/unlink', methods=['POST'])
+@rate_limit_strict(max_requests=10, window_seconds=60)
 def unlink_user(user_id):
     """Unlink user from emulator."""
     bot_service = current_app.bot_service
@@ -222,6 +230,7 @@ def unlink_user(user_id):
 
 
 @users_bp.route('/<user_id>/delete', methods=['DELETE'])
+@rate_limit_strict(max_requests=10, window_seconds=60)
 def delete_user(user_id):
     """Delete user from system."""
     bot_service = current_app.bot_service
@@ -259,6 +268,7 @@ def delete_user(user_id):
 
 
 @users_bp.route('/bulk-unlink-expired', methods=['POST'])
+@rate_limit_strict(max_requests=5, window_seconds=60)
 def bulk_unlink_expired():
     """Unlink all expired users."""
     bot_service = current_app.bot_service
@@ -322,6 +332,7 @@ def bulk_unlink_expired():
 
 
 @users_bp.route('/bulk-delete-expired', methods=['DELETE'])
+@rate_limit_strict(max_requests=5, window_seconds=60)
 def bulk_delete_expired():
     """Delete all expired users."""
     bot_service = current_app.bot_service

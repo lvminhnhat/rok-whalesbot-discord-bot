@@ -7,12 +7,12 @@ import os
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 from .models import User, BotConfig, AuditLog, Subscription
 from .constants import (
-    DATA_DIR, USERS_FILE, CONFIG_FILE, AUDIT_LOGS_FILE,
+    DATA_DIR, USERS_FILE, CONFIG_FILE, AUDIT_LOGS_FILE, COOLDOWNS_FILE,
     InstanceStatus, ActionType, ActionResult
 )
 
@@ -31,11 +31,13 @@ class DataManager:
         self.users_file = self.data_dir / USERS_FILE
         self.config_file = self.data_dir / CONFIG_FILE
         self.logs_file = self.data_dir / AUDIT_LOGS_FILE
+        self.cooldowns_file = self.data_dir / COOLDOWNS_FILE
         
         # Thread locks for file operations
         self._users_lock = threading.Lock()
         self._config_lock = threading.Lock()
         self._logs_lock = threading.Lock()
+        self._cooldowns_lock = threading.Lock()
         
         # Ensure data directory and files exist
         self._initialize_files()
@@ -56,6 +58,10 @@ class DataManager:
         # Initialize logs file
         if not self.logs_file.exists():
             self._write_json(self.logs_file, {"logs": []})
+        
+        # Initialize cooldowns file
+        if not self.cooldowns_file.exists():
+            self._write_json(self.cooldowns_file, {"cooldowns": {}})
     
     def _read_json(self, file_path: Path) -> Dict[str, Any]:
         """Read JSON file safely with Unicode-aware fallbacks."""
@@ -354,3 +360,63 @@ class DataManager:
                 logs = [log for log in logs if log.get('user_id') == user_id]
             
             return len(logs)
+    
+    # Cooldown operations
+    
+    def get_cooldown(self, user_id: str) -> Optional[str]:
+        """
+        Get cooldown timestamp for user.
+        
+        Args:
+            user_id: Discord user ID
+            
+        Returns:
+            ISO timestamp string or None if not found
+        """
+        with self._cooldowns_lock:
+            data = self._read_json(self.cooldowns_file)
+            cooldowns = data.get('cooldowns', {})
+            return cooldowns.get(user_id)
+    
+    def set_cooldown(self, user_id: str, timestamp: str) -> None:
+        """
+        Set cooldown timestamp for user.
+        
+        Args:
+            user_id: Discord user ID
+            timestamp: ISO timestamp string
+        """
+        with self._cooldowns_lock:
+            data = self._read_json(self.cooldowns_file)
+            cooldowns = data.get('cooldowns', {})
+            cooldowns[user_id] = timestamp
+            data['cooldowns'] = cooldowns
+            self._write_json(self.cooldowns_file, data)
+    
+    def cleanup_cooldowns(self, max_age_hours: int = 1) -> int:
+        """
+        Remove cooldown entries older than specified hours.
+        
+        Args:
+            max_age_hours: Maximum age in hours
+            
+        Returns:
+            Number of entries removed
+        """
+        with self._cooldowns_lock:
+            data = self._read_json(self.cooldowns_file)
+            cooldowns = data.get('cooldowns', {})
+            
+            now = datetime.now(pytz.UTC)
+            cutoff = now - timedelta(hours=max_age_hours)
+            
+            original_count = len(cooldowns)
+            cooldowns = {
+                uid: ts for uid, ts in cooldowns.items()
+                if datetime.fromisoformat(ts.replace('Z', '+00:00')) > cutoff
+            }
+            
+            data['cooldowns'] = cooldowns
+            self._write_json(self.cooldowns_file, data)
+            
+            return original_count - len(cooldowns)

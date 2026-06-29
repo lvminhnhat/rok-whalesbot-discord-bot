@@ -37,8 +37,37 @@ def _app_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _run_selftest() -> None:
+    """Verify the freeze-watchdog OCR works in this build (mainly: that winsdk
+    bundled into the exe). Renders a known string, OCRs it, prints the result.
+    No Discord, no admin needed.  Usage:  WhalesBot.exe --selftest
+    """
+    print(f"WhalesBot version {get_current_version()} - watchdog OCR self-test")
+    try:
+        from PIL import Image, ImageDraw
+        from whalebots_automation.services.watchdog_reader import ocr_image
+        img = Image.new("RGB", (360, 90), "white")
+        ImageDraw.Draw(img).text((12, 28), "[12:34:56] selftest", fill="black")
+        words, _lines = ocr_image(img, scale=2)
+        text = " ".join(w.text for w in words)
+        print(f"OCR result: {text!r}")
+        if "selftest" in text.lower():
+            print("[OK] OCR self-test PASSED - winsdk bundled correctly.")
+        else:
+            print("[WARN] OCR ran but didn't read the test text - inspect above.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[FAIL] OCR self-test FAILED: {e}")
+    input("Press Enter to exit...")
+
+
 def main():
     """Main entry point for Discord bot."""
+    if "--selftest" in sys.argv:
+        _run_selftest()
+        return
+
     # GUI control of the (elevated) ROKBot window and the freeze watchdog require
     # administrator rights. Request elevation up-front so the operator just clicks
     # the UAC prompt instead of remembering to "Run as administrator".

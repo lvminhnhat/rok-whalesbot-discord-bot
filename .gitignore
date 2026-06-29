@@ -10,6 +10,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# PyInstaller regenerates this on every build (build.bat deletes + recreates it)
+*.spec
 downloads/
 eggs/
 .eggs/

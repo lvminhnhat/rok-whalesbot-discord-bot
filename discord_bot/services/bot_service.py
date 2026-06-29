@@ -883,49 +883,61 @@ class BotService:
         content) then crops to just the game viewport, excluding the BlueStacks
         top bar and right toolbar.
 
+        DPI: makes THIS thread per-monitor DPI-aware first so GetClientRect/BitBlt
+        use physical pixels (otherwise, on a scaled display e.g. 125%, the capture
+        comes out zoomed/cropped). Thread-scoped and restored, so it never changes
+        the process-wide DPI mode that the start/stop GUI automation relies on.
+
         Args:
             hwnd: Window handle to capture
 
         Returns:
             PIL Image of the game viewport
         """
-        left, top, right, bottom = win32gui.GetClientRect(hwnd)
-        w = right - left
-        h = bottom - top
-
-        client_dc = win32gui.GetDC(hwnd)
-        mfc_dc = win32ui.CreateDCFromHandle(client_dc)
-        save_dc = mfc_dc.CreateCompatibleDC()
-        bitmap = win32ui.CreateBitmap()
-        bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
-        save_dc.SelectObject(bitmap)
-
-        save_dc.BitBlt((0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY)
-
-        bmp_info = bitmap.GetInfo()
-        bmp_bits = bitmap.GetBitmapBits(True)
-        img = Image.frombuffer(
-            'RGB',
-            (bmp_info['bmWidth'], bmp_info['bmHeight']),
-            bmp_bits, 'raw', 'BGRX', 0, 1,
+        from whalebots_automation.services.watchdog_reader import (
+            set_thread_dpi_aware, restore_thread_dpi,
         )
+        prev_dpi = set_thread_dpi_aware()
+        try:
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            w = right - left
+            h = bottom - top
 
-        win32gui.DeleteObject(bitmap.GetHandle())
-        save_dc.DeleteDC()
-        mfc_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, client_dc)
+            client_dc = win32gui.GetDC(hwnd)
+            mfc_dc = win32ui.CreateDCFromHandle(client_dc)
+            save_dc = mfc_dc.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
+            save_dc.SelectObject(bitmap)
 
-        # Crop to game viewport (exclude BlueStacks chrome)
-        viewport = self._get_game_viewport(hwnd)
-        if viewport:
-            vx, vy, vw, vh = viewport
-            img = img.crop((vx, vy, vx + vw, vy + vh))
+            save_dc.BitBlt((0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY)
 
-        return img
+            bmp_info = bitmap.GetInfo()
+            bmp_bits = bitmap.GetBitmapBits(True)
+            img = Image.frombuffer(
+                'RGB',
+                (bmp_info['bmWidth'], bmp_info['bmHeight']),
+                bmp_bits, 'raw', 'BGRX', 0, 1,
+            )
+
+            win32gui.DeleteObject(bitmap.GetHandle())
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            win32gui.ReleaseDC(hwnd, client_dc)
+
+            # Crop to game viewport (exclude BlueStacks chrome)
+            viewport = self._get_game_viewport(hwnd)
+            if viewport:
+                vx, vy, vw, vh = viewport
+                img = img.crop((vx, vy, vx + vw, vy + vh))
+
+            return img
+        finally:
+            restore_thread_dpi(prev_dpi)
 
     async def screenshot_emulator(self, emulator_name: str) -> Dict[str, Any]:
         """
-        Take a screenshot of an emulator window and return the right 1/3 cropped image.
+        Take a screenshot of an emulator window and return the full game viewport.
 
         Uses Win32 BitBlt to capture the BlueStacks window by its display name,
         which works without bringing the window to the foreground.
@@ -947,12 +959,8 @@ class BotService:
 
             img = await asyncio.to_thread(self._capture_window, hwnd)
 
-            width, height = img.size
-            left = width * 2 // 3
-            cropped = img.crop((left, 0, width, height))
-
             buf = io.BytesIO()
-            cropped.save(buf, format='PNG')
+            img.save(buf, format='PNG')
             buf.seek(0)
 
             return {'success': True, 'image': buf, 'name': emulator_name}

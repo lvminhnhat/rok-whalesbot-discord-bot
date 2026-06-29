@@ -25,6 +25,48 @@ except ImportError:
     from whalebots_automation.exceptions import WhaleBotsError, create_error_context
 
 
+class _SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler that tolerates Windows rename failures (WinError 32).
+
+    The rollover renames the log file, which fails if the file is momentarily
+    held open by another process (OneDrive sync, antivirus, a second instance).
+    Rather than erroring on every log call once the file is over size, we skip
+    the rotation this round and keep writing to the current file.
+    """
+
+    def doRollover(self):  # noqa: N802 (stdlib name)
+        try:
+            super().doRollover()
+        except (PermissionError, OSError):
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    self.stream = None
+
+
+# A single shared file handler for the whole process. Without this, every named
+# logger opens its OWN handle on the same log file, and rotation (rename) fails
+# on Windows because the other handles hold the file open.
+_shared_file_handler: Optional[logging.Handler] = None
+
+
+def _get_shared_file_handler(config, formatter: logging.Formatter) -> logging.Handler:
+    global _shared_file_handler
+    if _shared_file_handler is None:
+        log_dir = Path(config.log_file_path).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = _SafeRotatingFileHandler(
+            config.log_file_path,
+            maxBytes=config.max_log_file_size,
+            backupCount=config.backup_count,
+            encoding='utf-8',
+        )
+        handler.setFormatter(formatter)
+        _shared_file_handler = handler
+    return _shared_file_handler
+
+
 class WhaleBotsLogger:
     """
     Enhanced logger with security filtering and structured logging.
@@ -69,23 +111,12 @@ class WhaleBotsLogger:
             console_handler.setFormatter(formatter)
             self._logger.addHandler(console_handler)
 
-        # Add file handler if enabled
+        # Add file handler if enabled. Reuse ONE shared handler across all named
+        # loggers so the log file only has a single open handle (otherwise
+        # rotation fails on Windows - see _get_shared_file_handler).
         if self.config.enable_file_logging:
             try:
-                # Create log directory if it doesn't exist
-                log_dir = Path(self.config.log_file_path).parent
-                log_dir.mkdir(parents=True, exist_ok=True)
-
-                # Use rotating file handler
-                file_handler = logging.handlers.RotatingFileHandler(
-                    self.config.log_file_path,
-                    maxBytes=self.config.max_log_file_size,
-                    backupCount=self.config.backup_count,
-                    encoding='utf-8'
-                )
-                file_handler.setFormatter(formatter)
-                self._logger.addHandler(file_handler)
-
+                self._logger.addHandler(_get_shared_file_handler(self.config, formatter))
             except Exception as e:
                 # Fallback to console logging if file logging fails
                 self._logger.warning(f"Failed to setup file logging: {e}")

@@ -60,9 +60,12 @@ echo.
 echo [INFO] Running PyInstaller...
 echo.
 
+REM --collect-all winsdk: bundle the WinRT OCR projections the freeze watchdog
+REM uses (PyInstaller misses them otherwise and OCR fails at runtime).
 "%PY%" -m PyInstaller --onefile --name WhalesBot ^
     --add-data "VERSION;." ^
     --add-data "updater.bat;." ^
+    --collect-all winsdk ^
     run_bot.py
 
 if errorlevel 1 (

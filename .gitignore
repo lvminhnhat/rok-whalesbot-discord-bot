@@ -55,6 +55,7 @@ Thumbs.db
 # Backups
 backups/
 *.bak
+*.devbak
 WhaleBots.dll
 WhaleBots.exe
 /Apps/  

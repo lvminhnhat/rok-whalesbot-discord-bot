@@ -4,9 +4,29 @@ Discord bot launcher script.
 
 import os
 import sys
+import ctypes
 from dotenv import load_dotenv
 from discord_bot.bot import create_bot
-from shared.updater import check_and_prompt
+from shared.updater import check_and_prompt, get_current_version
+
+
+def _is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True  # non-Windows / can't determine -> don't block startup
+
+
+def _relaunch_as_admin() -> bool:
+    """Relaunch this program elevated (UAC prompt). Returns True if started."""
+    try:
+        argv = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+        params = " ".join(f'"{a}"' for a in argv)
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+        return rc > 32
+    except Exception as e:
+        print(f"[WARN] Could not request administrator elevation: {e}")
+        return False
 
 
 def _app_dir() -> str:
@@ -17,8 +37,46 @@ def _app_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _run_selftest() -> None:
+    """Verify the freeze-watchdog OCR works in this build (mainly: that winsdk
+    bundled into the exe). Renders a known string, OCRs it, prints the result.
+    No Discord, no admin needed.  Usage:  WhalesBot.exe --selftest
+    """
+    print(f"WhalesBot version {get_current_version()} - watchdog OCR self-test")
+    try:
+        from PIL import Image, ImageDraw
+        from whalebots_automation.services.watchdog_reader import ocr_image
+        img = Image.new("RGB", (360, 90), "white")
+        ImageDraw.Draw(img).text((12, 28), "[12:34:56] selftest", fill="black")
+        words, _lines = ocr_image(img, scale=2)
+        text = " ".join(w.text for w in words)
+        print(f"OCR result: {text!r}")
+        if "selftest" in text.lower():
+            print("[OK] OCR self-test PASSED - winsdk bundled correctly.")
+        else:
+            print("[WARN] OCR ran but didn't read the test text - inspect above.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[FAIL] OCR self-test FAILED: {e}")
+    input("Press Enter to exit...")
+
+
 def main():
     """Main entry point for Discord bot."""
+    if "--selftest" in sys.argv:
+        _run_selftest()
+        return
+
+    # GUI control of the (elevated) ROKBot window and the freeze watchdog require
+    # administrator rights. Request elevation up-front so the operator just clicks
+    # the UAC prompt instead of remembering to "Run as administrator".
+    if os.name == "nt" and not _is_admin():
+        print("[INFO] Requesting administrator privileges (needed for GUI control / watchdog)...")
+        if _relaunch_as_admin():
+            return  # the elevated instance takes over; this one exits
+        print("[WARN] Continuing WITHOUT admin - GUI control and the watchdog may not work.")
+
     script_dir = _app_dir()
     env_path = os.path.join(script_dir, '.env')
 
@@ -30,6 +88,8 @@ def main():
         print("Please create a .env file with DISCORD_BOT_TOKEN=your_token_here")
         input("Press Enter to exit...")
         return
+
+    print(f"WhalesBot version {get_current_version()}")
 
     # Check for updates before doing anything else. Exits the process
     # if the user accepts an update so the relauncher can swap files in.

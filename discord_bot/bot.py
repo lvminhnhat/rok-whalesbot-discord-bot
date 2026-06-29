@@ -4,6 +4,7 @@ Discord bot main application.
 
 import os
 import asyncio
+import ctypes
 from datetime import datetime, timedelta
 import pytz
 import discord
@@ -13,14 +14,42 @@ from shared.data_manager import DataManager
 from shared.constants import InstanceStatus
 from discord_bot.services.bot_service import BotService
 from discord_bot.services.subscription_service import SubscriptionService
-from discord_bot.services.ui_operation_queue import UIOperationQueue
+from discord_bot.services.ui_operation_queue import (
+    UIOperationQueue, OperationType, Priority, OperationStatus,
+)
+from discord_bot.services.watchdog_service import WatchdogService, WatchEvent
+from whalebots_automation.services.watchdog_reader import read_account_log, LogReading
 from discord_bot.utils.permissions import (
     init_permission_checker,
     get_instance_channel_ids,
     channel_matches_instance,
+    is_admin,
 )
 from discord_bot.commands.message_commands import setup_message_commands
 from discord_bot.commands.admin_commands import setup_admin_commands
+
+
+# Freeze-watchdog tuning
+WATCHDOG_INTERVAL_MIN = 3            # how often to sweep running instances
+WATCHDOG_PAUSE_IDLE_SECONDS = 120   # skip a sweep if local input happened within this window
+
+
+def _seconds_since_last_input():
+    """Seconds since the last local mouse/keyboard input, or None if unavailable.
+
+    Used to auto-pause the watchdog while someone is physically using the host
+    (so its mouse takeover never fights the user)."""
+    try:
+        class _LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        tick = ctypes.windll.kernel32.GetTickCount()
+        return max(0.0, (tick - info.dwTime) / 1000.0)
+    except Exception:
+        return None
 
 
 class WhaleBotDiscord(discord.Bot):
@@ -54,10 +83,29 @@ class WhaleBotDiscord(discord.Bot):
         
         # Initialize permission checker
         init_permission_checker(self.data_manager)
-        
+
+        # Freeze watchdog (per-account log monitoring)
+        self.watchdog_service = WatchdogService()
+        self._watchdog_busy = False
+        self.watchdog_enabled = os.getenv("WATCHDOG_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+        try:
+            self.watchdog_interval_min = max(1, int(os.getenv("WATCHDOG_INTERVAL_MIN", str(WATCHDOG_INTERVAL_MIN))))
+        except ValueError:
+            self.watchdog_interval_min = WATCHDOG_INTERVAL_MIN
+        try:
+            self.watchdog_pause_idle = int(os.getenv("WATCHDOG_PAUSE_IDLE_SECONDS", str(WATCHDOG_PAUSE_IDLE_SECONDS)))
+        except ValueError:
+            self.watchdog_pause_idle = WATCHDOG_PAUSE_IDLE_SECONDS
+        self.alert_channel_id = (os.getenv("ALERT_CHANNEL", "") or "").strip() or None
+        if not self.alert_channel_id:
+            _ids = sorted(get_instance_channel_ids())
+            self.alert_channel_id = _ids[0] if _ids else None
+        self.alert_mention = (os.getenv("ALERT_MENTION", "") or "").strip()
+
         # Setup commands
         setup_message_commands(self, self.bot_service, self.subscription_service, self.data_manager)
         setup_admin_commands(self, self.bot_service, self.subscription_service, self.data_manager)
+        self._setup_watchdog_command()
     
     def _validate_instance_channels(self, bound_channels):
         """Warn if any INSTANCE_CHANNEL ID can't be resolved to a visible channel.
@@ -140,6 +188,16 @@ class WhaleBotDiscord(discord.Bot):
         if not self.state_sync_task.is_running():
             self.state_sync_task.start()
             print("[OK] State sync task started")
+
+        # Start freeze watchdog
+        if not self.freeze_watchdog.is_running():
+            try:
+                self.freeze_watchdog.change_interval(minutes=self.watchdog_interval_min)
+            except Exception:
+                pass
+            self.freeze_watchdog.start()
+            print(f"[OK] Freeze watchdog started (enabled={self.watchdog_enabled}, "
+                  f"alert_channel={self.alert_channel_id})")
 
         # Start UI operation queue processor
         await self.operation_queue.start_processor()
@@ -337,6 +395,151 @@ class WhaleBotDiscord(discord.Bot):
         """Wait for bot to be ready before starting state sync task."""
         await self.wait_until_ready()
 
+    # ------------------------------------------------------------------
+    # Freeze watchdog
+    # ------------------------------------------------------------------
+    def _running_emulators(self):
+        """[{index, name}] for emulators currently active (state > 0)."""
+        try:
+            res = self.bot_service.get_available_emulators()
+            if not res.get("success"):
+                return []
+            return [{"index": e["index"], "name": e["name"]}
+                    for e in res.get("emulators", [])
+                    if e.get("is_active") and e.get("name")]
+        except Exception as e:
+            print(f"[WATCHDOG] could not list emulators: {e}")
+            return []
+
+    async def _queued_read(self, index: int, name: str) -> LogReading:
+        """Read one account's ACTIVITY LOG through the UI queue at LOW priority,
+        so a user's start/stop (NORMAL priority) preempts between reads instead
+        of fighting the watchdog for the mouse/window."""
+        async def _cb():
+            return await asyncio.to_thread(read_account_log, name)
+        try:
+            op_id = await self.operation_queue.add_operation(
+                operation_type=OperationType.STATUS_CHECK,
+                user_id="watchdog",
+                user_name="watchdog",
+                emulator_index=index,
+                priority=Priority.LOW,
+                timeout=90,
+                callback=_cb,
+                metadata={"watchdog": True, "account": name},
+            )
+            res = await self.operation_queue.wait_for_operation(op_id, timeout=120)
+        except Exception as e:
+            return LogReading(name, False, error=f"queue error: {e}")
+        if res and res.status == OperationStatus.COMPLETED and isinstance(res.result, LogReading):
+            return res.result
+        err = (res.error if res else "no result") or f"op status {getattr(res, 'status', None)}"
+        return LogReading(name, False, error=err)
+
+    async def _send_watchdog_alert(self, ev):
+        if not self.alert_channel_id:
+            print(f"[WATCHDOG] {ev.kind} {ev.name}: {ev.reason} (no ALERT_CHANNEL configured)")
+            return
+        channel = self.get_channel(int(self.alert_channel_id))
+        if channel is None:
+            print(f"[WATCHDOG] alert channel {self.alert_channel_id} not found/visible")
+            return
+        colors = {"frozen": 0xE74C3C, "still_frozen": 0xE67E22,
+                  "recovered": 0x2ECC71, "unreadable": 0x95A5A6}
+        titles = {"frozen": "🛑 Instance frozen", "still_frozen": "⏳ Still frozen",
+                  "recovered": "✅ Recovered", "unreadable": "⚠️ Log unreadable"}
+        embed = discord.Embed(
+            title=f"{titles.get(ev.kind, ev.kind)}: {ev.name}",
+            description=ev.reason,
+            color=colors.get(ev.kind, 0x95A5A6),
+        )
+        if ev.latest_ts:
+            embed.add_field(name="Last log", value=f"`{ev.latest_ts}`", inline=True)
+        if ev.recent_lines:
+            body = "\n".join(ev.recent_lines[-5:])[:1000]
+            embed.add_field(name="Recent log", value=f"```\n{body}\n```", inline=False)
+        content = self.alert_mention if (self.alert_mention and ev.kind in ("frozen", "still_frozen", "unreadable")) else None
+        try:
+            await channel.send(content=content, embed=embed)
+        except Exception as e:
+            print(f"[WATCHDOG] failed to send alert: {e}")
+
+    @tasks.loop(minutes=WATCHDOG_INTERVAL_MIN)
+    async def freeze_watchdog(self):
+        """Sweep running instances (reads serialized via the UI queue) and alert
+        on frozen/stuck ones. Each account read is a LOW-priority queue op, so
+        user start/stop commands jump ahead between reads."""
+        if self._watchdog_busy:
+            print("[WATCHDOG] previous sweep still running; skipping this tick")
+            return
+        try:
+            if not self.watchdog_enabled:
+                return
+            idle = _seconds_since_last_input()
+            if self.watchdog_pause_idle > 0 and idle is not None and idle < self.watchdog_pause_idle:
+                print(f"[WATCHDOG] paused — local input {idle:.0f}s ago")
+                return
+            emus = self._running_emulators()
+            if not emus:
+                return
+            self._watchdog_busy = True
+            print(f"[WATCHDOG] sweeping {len(emus)} instance(s)...")
+            for emu in emus:
+                if not self.watchdog_enabled:
+                    break  # toggled off mid-sweep
+                reading = await self._queued_read(emu["index"], emu["name"])
+                print(f"[WATCHDOG]   {emu['name']} (idx {emu['index']}): "
+                      f"ok={reading.ok} ts={reading.latest_ts} err={reading.error}")
+                ev = self.watchdog_service.process_reading(emu["name"], reading)
+                if ev:
+                    print(f"[WATCHDOG] {ev.kind}: {ev.name} — {ev.reason}")
+                    await self._send_watchdog_alert(ev)
+        except Exception as e:
+            print(f"[ERROR] freeze_watchdog: {e}")
+        finally:
+            self._watchdog_busy = False
+
+    @freeze_watchdog.before_loop
+    async def before_freeze_watchdog(self):
+        await self.wait_until_ready()
+
+    def _setup_watchdog_command(self):
+        bot = self
+
+        @bot.slash_command(name="watchdog",
+                           description="Turn the freeze watchdog on/off or check status")
+        async def watchdog(ctx: discord.ApplicationContext,
+                           action: discord.Option(str, "on / off / status / test",
+                                                   choices=["on", "off", "status", "test"]) = "status"):
+            if not is_admin(ctx):
+                await ctx.respond("You don't have permission to use this.", ephemeral=True)
+                return
+            if action == "on":
+                bot.watchdog_enabled = True
+                await ctx.respond("✅ Freeze watchdog **enabled**.", ephemeral=True)
+            elif action == "off":
+                bot.watchdog_enabled = False
+                await ctx.respond("⏸️ Freeze watchdog **disabled** — it won't touch the mouse.",
+                                  ephemeral=True)
+            elif action == "test":
+                await bot._send_watchdog_alert(WatchEvent(
+                    name="TEST", kind="frozen",
+                    reason="manual test of the alert pipeline (/watchdog test)",
+                    latest_ts="00:00:00",
+                    recent_lines=["[00:00:00] this is a test alert"]))
+                await ctx.respond(
+                    f"Sent a test alert to channel `{bot.alert_channel_id}` "
+                    f"(mention: `{bot.alert_mention or 'none'}`).", ephemeral=True)
+            else:
+                state = "enabled" if bot.watchdog_enabled else "disabled"
+                tracked = len(bot.watchdog_service.states)
+                frozen = sum(1 for s in bot.watchdog_service.states.values() if s.frozen)
+                await ctx.respond(
+                    f"Freeze watchdog is **{state}**. Tracking {tracked} instance(s); "
+                    f"{frozen} currently flagged frozen.",
+                    ephemeral=True,
+                )
+
     async def close(self):
         """Cleanup on bot shutdown."""
         print("[INFO] Shutting down bot...")
@@ -353,6 +556,9 @@ class WhaleBotDiscord(discord.Bot):
 
         if self.state_sync_task.is_running():
             self.state_sync_task.stop()
+
+        if self.freeze_watchdog.is_running():
+            self.freeze_watchdog.stop()
 
         # Cleanup bot service
         self.bot_service.cleanup()

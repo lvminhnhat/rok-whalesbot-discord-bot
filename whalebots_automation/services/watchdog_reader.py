@@ -38,7 +38,7 @@ import win32api
 import win32con
 import win32gui
 from ctypes import windll
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 
 try:
     import pythoncom  # pywin32 - to COM-init worker threads (winsdk OCR needs it)
@@ -128,6 +128,8 @@ LIST_Y_MAX = 182
 LOG_MIN_X = 370
 # A point over the account list to wheel-scroll it.
 LIST_SCROLL_X, LIST_SCROLL_Y = 150, 90
+# A point over the right-hand ACTIVITY LOG panel to wheel-scroll it to newest.
+LOG_SCROLL_X, LOG_SCROLL_Y = 720, 400
 
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2}):(\d{2})\]")
 
@@ -200,14 +202,22 @@ async def _ocr_async(png_path: str) -> Tuple[List[Word], List[dict]]:
     return words, lines
 
 
-def ocr_image(img) -> Tuple[List[Word], List[dict]]:
-    """Run Windows OCR on a PIL image; returns (words, lines).
+def ocr_image(img, scale: int = 2) -> Tuple[List[Word], List[dict]]:
+    """Run Windows OCR on a PIL image; returns (words, lines) in ORIGINAL pixels.
+
+    The image is upscaled `scale`x before OCR so small text (the [HH:MM:SS]
+    timestamps especially) resolves reliably; coordinates are scaled back.
 
     Runs the OCR on a FRESH thread that we COM-initialize as MTA. WinRT OCR
     under asyncio.run hangs on an STA thread (e.g. the process main thread, which
     pywin32 puts in STA), so we never run it on the caller's thread. The fresh
     thread also gets a hard timeout so a stuck call can't wedge anything.
     """
+    if scale != 1:
+        try:
+            img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+        except Exception:
+            scale = 1
     fd, path = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     img.save(path)
@@ -230,9 +240,15 @@ def ocr_image(img) -> Tuple[List[Word], List[dict]]:
         os.remove(path)
     except OSError:
         pass
-    if "result" in box:
-        return box["result"]
-    raise box.get("error", RuntimeError("OCR thread timed out"))
+    if "result" not in box:
+        raise box.get("error", RuntimeError("OCR thread timed out"))
+    words, lines = box["result"]
+    if scale != 1:
+        words = [Word(w.text, w.x // scale, w.y // scale, w.w // scale, w.h // scale)
+                 for w in words]
+        lines = [{"text": ln["text"], "x": ln["x"] // scale, "y": ln["y"] // scale}
+                 for ln in lines]
+    return words, lines
 
 
 # --------------------------------------------------------------------------
@@ -423,6 +439,29 @@ def _has_anchors(words: List[Word]) -> bool:
     return "ACTIVITIES" in txts or ("ACTIVITY" in txts and "LOG" in txts)
 
 
+def _log_lines_from_words(words: List[Word]) -> List[str]:
+    """Reconstruct ACTIVITY LOG lines from RIGHT-panel words only, grouped into
+    rows by y.
+
+    The OCR groups text by physical row, so a single OCR line mixes the left
+    ACTIVITIES column and the right LOG column. We therefore drop everything left
+    of the log panel and rebuild each log row from the remaining words.
+    """
+    log_words = sorted((w for w in words if w.x >= LOG_MIN_X), key=lambda w: (w.cy, w.x))
+    rows: List[Tuple[int, List[str]]] = []
+    for w in log_words:
+        if rows and abs(w.cy - rows[-1][0]) <= 8:   # same row (~27px row pitch)
+            rows[-1][1].append(w.text)
+        else:
+            rows.append((w.cy, [w.text]))
+    out = []
+    for _cy, texts in rows:
+        line = " ".join(texts)
+        if TS_RE.search(line):
+            out.append(line)
+    return out
+
+
 def _latest_ts(lines: List[str]) -> Optional[str]:
     best = None
     for ln in lines:
@@ -493,10 +532,10 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
             win.click_client(*tab)
             time.sleep(0.5)
 
-        # 3) read the log panel (right side)
-        _words, lines = ocr_image(win.capture())
-        log_lines = [ln["text"] for ln in lines
-                     if ln["x"] >= LOG_MIN_X and TS_RE.search(ln["text"])]
+        # 3) read the log panel. Rebuild log rows from RIGHT-panel words only
+        #    (the OCR merges the left ACTIVITIES column onto the same rows).
+        words, _lines = ocr_image(win.capture())
+        log_lines = _log_lines_from_words(words)
         if not log_lines:
             return LogReading(name, False, error="no log lines read (panel empty or occluded)")
 

@@ -7,7 +7,7 @@ import sys
 import ctypes
 from dotenv import load_dotenv
 from discord_bot.bot import create_bot
-from shared.updater import check_and_prompt
+from shared.updater import check_and_prompt, get_current_version
 
 
 def _is_admin() -> bool:
@@ -59,6 +59,8 @@ def main():
         print("Please create a .env file with DISCORD_BOT_TOKEN=your_token_here")
         input("Press Enter to exit...")
         return
+
+    print(f"WhalesBot version {get_current_version()}")
 
     # Check for updates before doing anything else. Exits the process
     # if the user accepts an update so the relauncher can swap files in.

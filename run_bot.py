@@ -4,9 +4,29 @@ Discord bot launcher script.
 
 import os
 import sys
+import ctypes
 from dotenv import load_dotenv
 from discord_bot.bot import create_bot
 from shared.updater import check_and_prompt
+
+
+def _is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True  # non-Windows / can't determine -> don't block startup
+
+
+def _relaunch_as_admin() -> bool:
+    """Relaunch this program elevated (UAC prompt). Returns True if started."""
+    try:
+        argv = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+        params = " ".join(f'"{a}"' for a in argv)
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+        return rc > 32
+    except Exception as e:
+        print(f"[WARN] Could not request administrator elevation: {e}")
+        return False
 
 
 def _app_dir() -> str:
@@ -19,6 +39,15 @@ def _app_dir() -> str:
 
 def main():
     """Main entry point for Discord bot."""
+    # GUI control of the (elevated) ROKBot window and the freeze watchdog require
+    # administrator rights. Request elevation up-front so the operator just clicks
+    # the UAC prompt instead of remembering to "Run as administrator".
+    if os.name == "nt" and not _is_admin():
+        print("[INFO] Requesting administrator privileges (needed for GUI control / watchdog)...")
+        if _relaunch_as_admin():
+            return  # the elevated instance takes over; this one exits
+        print("[WARN] Continuing WITHOUT admin - GUI control and the watchdog may not work.")
+
     script_dir = _app_dir()
     env_path = os.path.join(script_dir, '.env')
 

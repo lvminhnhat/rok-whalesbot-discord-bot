@@ -48,7 +48,11 @@ if %RC% GEQ 8 (
 
 echo [updater] Update applied. Relaunching %EXE_NAME%...
 cd /d "%INSTALL_DIR%"
-start "" "%INSTALL_DIR%\%EXE_NAME%"
+REM Use PowerShell Start-Process, not cmd's `start`: when updater.bat runs
+REM detached (no console), `start` fails with "Not enough memory resources".
+REM Start-Process launches reliably from any context.
+powershell -NoProfile -Command "Start-Process -FilePath '%INSTALL_DIR%\%EXE_NAME%' -WorkingDirectory '%INSTALL_DIR%'"
+if errorlevel 1 echo [updater] Auto-relaunch failed - please start %EXE_NAME% manually.
 
 :cleanup
 rmdir /S /Q "%STAGING%" >nul 2>&1

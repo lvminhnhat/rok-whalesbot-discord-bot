@@ -149,11 +149,14 @@ def _spawn_updater_and_exit(staging_dir: str) -> None:
     else:
         exe_name = "WhalesBot.exe"
 
-    DETACHED = 0x00000008
-    NEW_GROUP = 0x00000200
+    # Run the updater in its OWN new console (survives this process exiting).
+    # We avoid the previous `cmd /c start "" bat ...` form: that nested `start`
+    # ran the bat with no console, where cmd's `start`/relaunch fails with
+    # "Not enough memory resources are available to process this command".
+    CREATE_NEW_CONSOLE = 0x00000010
     subprocess.Popen(
-        ["cmd.exe", "/c", "start", "", bat, staging_dir, install_dir, exe_name],
-        creationflags=DETACHED | NEW_GROUP,
+        ["cmd.exe", "/c", bat, staging_dir, install_dir, exe_name],
+        creationflags=CREATE_NEW_CONSOLE,
         close_fds=True,
     )
     print("[updater] Update staged. Closing so the updater can swap files in...")

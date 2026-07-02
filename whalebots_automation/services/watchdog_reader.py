@@ -25,6 +25,7 @@ MUST run elevated (ROKBot runs as administrator).
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import tempfile
@@ -117,19 +118,105 @@ def restore_thread_dpi(prev) -> None:
 
 TITLE_SUBSTR = "Rise of Kingdoms Bot"
 
-# Window size we force so BOTH panels (ACTIVITIES | ACTIVITY LOG) are visible.
-WIN_W, WIN_H = 900, 720
+# ---------------------------------------------------------------------------
+# Layout metrics - scale with the monitor the ROKBot window is on.
+#
+# The ROKBot UI renders proportionally larger on scaled displays: whatever
+# ROKBot's own DPI-awareness mode is, the on-screen (physical-pixel) content
+# ends up multiplied by the monitor's scale factor - either it renders at that
+# DPI itself or DWM bitmap-stretches it there. Our thread is per-monitor-v2
+# aware, so all coords here are physical pixels. Every pixel constant is
+# therefore expressed at a 100% (96 DPI) baseline and multiplied by the
+# window's monitor factor at runtime. (Originally calibrated at 125% on
+# 2560x1440, where e.g. the window was forced to 900x720 = 720x576 * 1.25.)
+# ---------------------------------------------------------------------------
 
+# Window size we force so BOTH panels (ACTIVITIES | ACTIVITY LOG) are visible.
+BASE_WIN_W, BASE_WIN_H = 720, 576
 # The account list sits at the TOP of the window; its rows are above this y
-# (tabs row is ~y185). x-position of names shifts with width, so we filter by y.
-# Kept just under the tab row so a bottom row that's scrolled to the edge still counts.
-LIST_Y_MAX = 182
+# (tabs row is just below). Kept just under the tab row so a bottom row that's
+# scrolled to the edge still counts.
+BASE_LIST_Y_MAX = 146
 # Activity-log text is in the right panel (right of this x).
-LOG_MIN_X = 370
+BASE_LOG_MIN_X = 296
+# The account name lives in the left column; this keeps matching off the
+# status / resource columns (and the ACTIVITIES checklist below the list).
+BASE_NAME_MAX_X = 160
 # A point over the account list to wheel-scroll it.
-LIST_SCROLL_X, LIST_SCROLL_Y = 150, 90
+BASE_LIST_SCROLL = (120, 72)
 # A point over the right-hand ACTIVITY LOG panel to wheel-scroll it to newest.
-LOG_SCROLL_X, LOG_SCROLL_Y = 720, 400
+BASE_LOG_SCROLL = (576, 320)
+# Words within this y-distance belong to the same log row (~22px pitch at 100%).
+BASE_ROW_TOL = 6.5
+
+
+@dataclass
+class Metrics:
+    """All layout values for one read, computed from the monitor scale factor."""
+    scale: float                     # monitor scale (1.0 = 96 DPI, 1.25 = 125%)
+    win_w: int
+    win_h: int
+    list_y_max: int
+    log_min_x: int
+    name_max_x: int
+    list_scroll: Tuple[int, int]
+    log_scroll: Tuple[int, int]
+    row_tol: int
+    ocr_scale: int                   # OCR upscale factor for this text size
+
+
+def metrics_for(scale: float) -> Metrics:
+    s = max(0.5, float(scale))
+    # OCR needs an effective (scale * upscale) of ~2.5x the 96-DPI text size to
+    # resolve the [HH:MM:SS] timestamps: 2x was calibrated at 125% (=2.5x
+    # effective); at 100% that same text is 20% smaller, so upscale 3x instead.
+    ocr = max(2, math.ceil(2.5 / s))
+    return Metrics(
+        scale=s,
+        win_w=round(BASE_WIN_W * s),
+        win_h=round(BASE_WIN_H * s),
+        list_y_max=round(BASE_LIST_Y_MAX * s),
+        log_min_x=round(BASE_LOG_MIN_X * s),
+        name_max_x=round(BASE_NAME_MAX_X * s),
+        list_scroll=(round(BASE_LIST_SCROLL[0] * s), round(BASE_LIST_SCROLL[1] * s)),
+        log_scroll=(round(BASE_LOG_SCROLL[0] * s), round(BASE_LOG_SCROLL[1] * s)),
+        row_tol=max(4, round(BASE_ROW_TOL * s)),
+        ocr_scale=ocr,
+    )
+
+
+def _window_scale(hwnd) -> float:
+    """Scale factor of the monitor the window is on (1.0 = 96 DPI).
+
+    Uses GetDpiForMonitor(MDT_EFFECTIVE_DPI) on the window's monitor - NOT
+    GetDpiForWindow(hwnd), which returns 96 for a DPI-unaware target window
+    even on a scaled monitor. Explicit argtypes because a bare 64-bit HWND
+    silently truncates through ctypes' default int marshaling.
+    """
+    try:
+        u = windll.user32
+        u.MonitorFromWindow.restype = ctypes.c_void_p
+        u.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        mon = u.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        sh = windll.shcore
+        sh.GetDpiForMonitor.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                        ctypes.POINTER(ctypes.c_uint),
+                                        ctypes.POINTER(ctypes.c_uint)]
+        dx, dy = ctypes.c_uint(), ctypes.c_uint()
+        if sh.GetDpiForMonitor(mon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+            return dx.value / 96.0  # MDT_EFFECTIVE_DPI
+    except Exception:
+        pass
+    try:
+        # Fallback (pre-Win8.1): system DPI. Thread is DPI-aware, so this is
+        # the real value, just not per-monitor.
+        hdc = windll.user32.GetDC(0)
+        try:
+            return windll.gdi32.GetDeviceCaps(hdc, 88) / 96.0  # LOGPIXELSX
+        finally:
+            windll.user32.ReleaseDC(0, hdc)
+    except Exception:
+        return 1.0
 
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2}):(\d{2})\]")
 
@@ -258,6 +345,7 @@ class ROKWindow:
     def __init__(self):
         self.hwnd = None
         self._orig = None  # (x, y, w, h, was_topmost) captured in prepare()
+        self.m = metrics_for(1.0)  # replaced with the real monitor scale in prepare()
 
     def find(self) -> bool:
         res = []
@@ -279,6 +367,8 @@ class ROKWindow:
         """
         if win32gui.IsIconic(self.hwnd):
             win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+        # Size everything for the monitor this window actually lives on.
+        self.m = metrics_for(_window_scale(self.hwnd))
         # Remember the window's current placement so we can put it back afterward
         # (the existing start/stop automation relies on the user's window size).
         try:
@@ -288,8 +378,8 @@ class ROKWindow:
         except Exception:
             self._orig = None
         # Raise above everything (BlueStacks / terminal) and resize to show both panels.
-        win32gui.SetWindowPos(self.hwnd, win32con.HWND_TOPMOST, 0, 0, WIN_W, WIN_H,
-                              win32con.SWP_NOMOVE)
+        win32gui.SetWindowPos(self.hwnd, win32con.HWND_TOPMOST, 0, 0,
+                              self.m.win_w, self.m.win_h, win32con.SWP_NOMOVE)
         try:
             win32gui.SetForegroundWindow(self.hwnd)
         except Exception:
@@ -322,7 +412,7 @@ class ROKWindow:
         Over-scrolls up well past the list length; scrolling up at the top is a
         harmless no-op, so this lands on the top from anywhere.
         """
-        self.scroll(LIST_SCROLL_X, LIST_SCROLL_Y, 30, settle=0.25)
+        self.scroll(*self.m.list_scroll, 30, settle=0.25)
 
     def capture(self):
         l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
@@ -380,18 +470,14 @@ def _edit_dist(a: str, b: str) -> int:
     return prev[lb]
 
 
-# The account name lives in the left column; this keeps matching off the
-# status / resource columns (and the ACTIVITIES checklist below the list).
-NAME_MAX_X = 200
-
-
-def _find_name(words: List[Word], name: str) -> Optional[Word]:
+def _find_name(words: List[Word], name: str, m: Metrics) -> Optional[Word]:
     """Find an account name in the list's name column, tolerant of OCR noise
     (OCR routinely garbles a character, e.g. 'Duc' -> 'ouc', 'MinHe' -> 'Mir,He')."""
     t = _norm(name)
     n = len(t)
     cands = [w for w in words
-             if w.cy <= LIST_Y_MAX and w.cx < NAME_MAX_X and any(c.isalpha() for c in w.text)]
+             if w.cy <= m.list_y_max and w.cx < m.name_max_x
+             and any(c.isalpha() for c in w.text)]
 
     # 1) exact (normalized)
     for w in cands:
@@ -420,7 +506,7 @@ def _find_name(words: List[Word], name: str) -> Optional[Word]:
     return None
 
 
-def _find_log_tab(words: List[Word]) -> Optional[Tuple[int, int]]:
+def _find_log_tab(words: List[Word], m: Metrics) -> Optional[Tuple[int, int]]:
     """Locate the 'ACTIVITY LOG' tab (right side)."""
     # "ACTIVITY" (the log tab) is distinct from "ACTIVITIES" (left tab), so an
     # exact match uniquely identifies the right-panel log tab.
@@ -429,7 +515,7 @@ def _find_log_tab(words: List[Word]) -> Optional[Tuple[int, int]]:
     if act and log:
         return ((act[0].cx + log[0].cx) // 2, (act[0].cy + log[0].cy) // 2)
     if act:
-        return (act[0].cx + 28, act[0].cy)
+        return (act[0].cx + round(22 * m.scale), act[0].cy)
     return None
 
 
@@ -439,7 +525,7 @@ def _has_anchors(words: List[Word]) -> bool:
     return "ACTIVITIES" in txts or ("ACTIVITY" in txts and "LOG" in txts)
 
 
-def _log_lines_from_words(words: List[Word]) -> List[str]:
+def _log_lines_from_words(words: List[Word], m: Metrics) -> List[str]:
     """Reconstruct ACTIVITY LOG lines from RIGHT-panel words only, grouped into
     rows by y.
 
@@ -447,10 +533,10 @@ def _log_lines_from_words(words: List[Word]) -> List[str]:
     ACTIVITIES column and the right LOG column. We therefore drop everything left
     of the log panel and rebuild each log row from the remaining words.
     """
-    log_words = sorted((w for w in words if w.x >= LOG_MIN_X), key=lambda w: (w.cy, w.x))
+    log_words = sorted((w for w in words if w.x >= m.log_min_x), key=lambda w: (w.cy, w.x))
     rows: List[Tuple[int, List[str]]] = []
     for w in log_words:
-        if rows and abs(w.cy - rows[-1][0]) <= 8:   # same row (~27px row pitch)
+        if rows and abs(w.cy - rows[-1][0]) <= m.row_tol:   # same log row
             rows[-1][1].append(w.text)
         else:
             rows.append((w.cy, [w.text]))
@@ -492,28 +578,29 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
         #    been left scrolled anywhere by an interleaved start/stop), then page
         #    DOWN a couple of rows at a time until we find it or hit the bottom.
         win.scroll_to_top()
+        m = win.m                # layout metrics for this window's monitor scale
         selected = False
         last_keys = None
         seen = set()             # every list-row word seen (for diagnosis if not found)
         for _ in range(18):      # ~18 pages * ~2-4 rows >> max account count
-            words, _lines = ocr_image(win.capture())
+            words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
             if not _has_anchors(words):
                 return LogReading(name, False, error="window occluded (no ROKBot anchors visible)")
             for w in words:
-                if w.cy <= LIST_Y_MAX and len(w.text) >= 2:
+                if w.cy <= m.list_y_max and len(w.text) >= 2:
                     seen.add(w.text)
-            nm = _find_name(words, name)
+            nm = _find_name(words, name, m)
             if nm:
                 win.click_client(nm.cx, nm.cy)
                 time.sleep(0.4)
                 selected = True
                 break
             keys = frozenset(_norm(w.text) for w in words
-                             if w.cy <= LIST_Y_MAX and w.cx < NAME_MAX_X and any(c.isalpha() for c in w.text))
+                             if w.cy <= m.list_y_max and w.cx < m.name_max_x and any(c.isalpha() for c in w.text))
             if last_keys is not None and keys == last_keys:
                 break            # view didn't change after scrolling -> bottom reached
             last_keys = keys
-            win.scroll(LIST_SCROLL_X, LIST_SCROLL_Y, -2)   # page down ~2-4 rows (overlap, no skip)
+            win.scroll(*m.list_scroll, -2)   # page down ~2-4 rows (overlap, no skip)
         if not selected:
             try:
                 win.capture().save(rf"C:\Users\binlo\rok_notfound_{name}.png")
@@ -526,16 +613,16 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
                                     f"(png saved). names seen: {sample}")
 
         # 2) ensure ACTIVITY LOG tab is active
-        words, _lines = ocr_image(win.capture())
-        tab = _find_log_tab(words)
+        words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
+        tab = _find_log_tab(words, m)
         if tab:
             win.click_client(*tab)
             time.sleep(0.5)
 
         # 3) read the log panel. Rebuild log rows from RIGHT-panel words only
         #    (the OCR merges the left ACTIVITIES column onto the same rows).
-        words, _lines = ocr_image(win.capture())
-        log_lines = _log_lines_from_words(words)
+        words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
+        log_lines = _log_lines_from_words(words, m)
         if not log_lines:
             return LogReading(name, False, error="no log lines read (panel empty or occluded)")
 
@@ -570,16 +657,21 @@ if __name__ == "__main__":
         if not w.find():
             print("ROKBot window not found"); raise SystemExit(1)
         w.prepare()
-        words, lines = ocr_image(w.capture())
+        cap = w.capture()
+        cap.save(r"C:\Users\binlo\rok_ocr_dump.png")
+        words, lines = ocr_image(cap, scale=w.m.ocr_scale)
+        heights = sorted(wd.h for wd in words) if words else []
+        med_h = heights[len(heights) // 2] if heights else 0
         out = r"C:\Users\binlo\rok_ocr_dump.txt"
         with open(out, "w", encoding="utf-8") as fh:
-            fh.write(f"--- {len(words)} words (text @ client cx,cy) ---\n")
+            fh.write(f"monitor scale: {w.m.scale:.2f}  | metrics: {w.m}\n")
+            fh.write(f"client capture size: {cap.size}  | median text height: {med_h}px "
+                     f"(original pixels; OCR upscaled {w.m.ocr_scale}x)\n")
+            fh.write(f"--- {len(words)} words (text @ client cx,cy, h=height) ---\n")
             for wd in sorted(words, key=lambda z: (z.cy, z.cx)):
-                fh.write(f"  ({wd.cx:>4},{wd.cy:>4})  '{wd.text}'\n")
-            fh.write("\n--- lines (x>=LOG_MIN_X with timestamp) ---\n")
-            for ln in lines:
-                fh.write(f"  x={ln['x']:>4} y={ln['y']:>4}  {ln['text']}\n")
-        print(f"{len(words)} words; wrote {out}")
+                fh.write(f"  ({wd.cx:>4},{wd.cy:>4}) h={wd.h:>2}  '{wd.text}'\n")
+        print(f"scale {w.m.scale:.2f}, {len(words)} words, client {cap.size}, "
+              f"median text height {med_h}px; wrote {out} (+ .png)")
         w.release_topmost()
         raise SystemExit(0)
 

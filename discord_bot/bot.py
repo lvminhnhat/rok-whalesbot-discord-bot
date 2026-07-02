@@ -19,6 +19,7 @@ from discord_bot.services.ui_operation_queue import (
     _seconds_since_last_input,
 )
 from discord_bot.services.watchdog_service import WatchdogService, WatchEvent
+from discord_bot.services.schedule_service import ScheduleService
 from whalebots_automation.services.watchdog_reader import (
     read_account_log, LogReading, close_account_via_menu, click_account_checkbox,
 )
@@ -105,6 +106,10 @@ class WhaleBotDiscord(discord.Bot):
             self.recovery_settle = RECOVERY_SETTLE_SECONDS
         self._recovery_last: dict = {}      # name -> monotonic time of last attempt
         self._recovery_busy: set = set()    # names currently being recovered
+
+        # Scheduled start/stop (persisted; survives restart / auto-update)
+        self.schedule_service = ScheduleService()
+        self._schedule_busy = False
 
         # Setup commands
         setup_message_commands(self, self.bot_service, self.subscription_service, self.data_manager)
@@ -203,6 +208,12 @@ class WhaleBotDiscord(discord.Bot):
             self.freeze_watchdog.start()
             print(f"[OK] Freeze watchdog started (enabled={self.watchdog_enabled}, "
                   f"alert_channel={self.alert_channel_id})")
+
+        # Start scheduled start/stop tick
+        if not self.schedule_tick.is_running():
+            self.schedule_tick.start()
+            pending = len(self.schedule_service.all_jobs())
+            print(f"[OK] Schedule tick started ({pending} pending job(s))")
 
         # Start UI operation queue processor
         await self.operation_queue.start_processor()
@@ -445,6 +456,17 @@ class WhaleBotDiscord(discord.Bot):
         err = (res.error if res else "no result") or f"op status {getattr(res, 'status', None)}"
         return LogReading(name, False, error=err)
 
+    async def _execute_user_action(self, user_id: str, action: str, target):
+        """Run a start/stop for a user. `target` is None (their default/first
+        emulator), 'all' (every emulator they own), or an emulator name. Shared
+        by the immediate message commands and the schedule tick so both behave
+        identically."""
+        bs = self.bot_service
+        if target == "all":
+            return await (bs.start_all if action == "start" else bs.stop_all)(user_id)
+        fn = bs.start_instance if action == "start" else bs.stop_instance
+        return await fn(user_id, emulator_name=target)
+
     async def _recover_account(self, name: str, index: int, roster=None,
                                manual: bool = False) -> dict:
         """Close a stuck instance via its right-click menu, wait, and restart it.
@@ -649,6 +671,60 @@ class WhaleBotDiscord(discord.Bot):
     async def before_freeze_watchdog(self):
         await self.wait_until_ready()
 
+    # ------------------------------------------------------------------
+    # Scheduled start/stop
+    # ------------------------------------------------------------------
+    @tasks.loop(seconds=30)
+    async def schedule_tick(self):
+        """Fire any scheduled start/stop whose UTC time has arrived.
+
+        pop_due removes jobs as it returns them, so each runs exactly once even
+        if execution overruns a tick. Jobs whose time passed while the bot was
+        down (restart/auto-update) are simply due now and run on the first
+        tick after startup."""
+        if self._schedule_busy:
+            return
+        try:
+            due = self.schedule_service.pop_due()
+        except Exception as e:
+            print(f"[SCHEDULE] pop_due failed: {e}")
+            return
+        if not due:
+            return
+        self._schedule_busy = True
+        try:
+            for job in due:
+                print(f"[SCHEDULE] firing {job.id}: {job.action} "
+                      f"{job.describe_target()} for {job.user_name}")
+                try:
+                    result = await self._execute_user_action(
+                        job.user_id, job.action, job.target)
+                    msg = result.get("message", "(no message)")
+                    ok = result.get("success")
+                except Exception as e:
+                    ok, msg = False, f"error: {e}"
+                await self._post_schedule_result(job, ok, msg)
+        finally:
+            self._schedule_busy = False
+
+    @schedule_tick.before_loop
+    async def before_schedule_tick(self):
+        await self.wait_until_ready()
+
+    async def _post_schedule_result(self, job, ok: bool, msg: str):
+        """Report a fired schedule back to the channel it was set from."""
+        header = (f"🗓️ Scheduled **{job.action} {job.describe_target()}** "
+                  f"(<@{job.user_id}>) just ran:")
+        text = f"{header}\n{msg}"
+        channel = self.get_channel(int(job.channel_id)) if job.channel_id else None
+        if channel is None:
+            print(f"[SCHEDULE] channel {job.channel_id} unavailable — {text}")
+            return
+        try:
+            await channel.send(text)
+        except Exception as e:
+            print(f"[SCHEDULE] failed to post result: {e} — {text}")
+
     def _setup_watchdog_command(self):
         bot = self
 
@@ -789,6 +865,9 @@ class WhaleBotDiscord(discord.Bot):
 
         if self.freeze_watchdog.is_running():
             self.freeze_watchdog.stop()
+
+        if self.schedule_tick.is_running():
+            self.schedule_tick.stop()
 
         # Cleanup bot service
         self.bot_service.cleanup()

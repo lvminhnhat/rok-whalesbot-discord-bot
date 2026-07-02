@@ -467,6 +467,65 @@ class BotService:
                 'message': f'Unknown error: {str(e)}'
             }
     
+    async def _bulk_action(self, user_id: str, action: str) -> Dict[str, Any]:
+        """Start or stop ALL emulators a Discord user owns.
+
+        For each emulator we check its ACTUAL live state (per-index, not the
+        single user.status field which can't represent multiple emulators):
+        already in the desired state -> report it and skip; otherwise run the
+        normal queued start/stop for that emulator and report its result.
+        """
+        assert action in ("start", "stop")
+        is_admin = self._is_admin(user_id)
+        user = self.data_manager.get_user(user_id)
+        if not user or not user.is_linked:
+            return {
+                'success': False,
+                'message': ("You aren't linked to any emulator." if not is_admin
+                            else 'No linked emulators for this account; specify a name instead.')
+            }
+
+        names = list(user.emulator_names)
+        started = action == "start"
+        acted, skipped, failed = [], [], []
+        for name in names:
+            resolve = self._resolve_emulator_index(user, name, is_admin=is_admin)
+            if not resolve.get('success'):
+                failed.append(f"{name}: {resolve.get('message', 'could not resolve')}")
+                continue
+            actual_running = self._get_actual_emulator_state(resolve['index'])
+            if started and actual_running:
+                skipped.append(f"{name}: already running")
+                continue
+            if not started and not actual_running:
+                skipped.append(f"{name}: already stopped")
+                continue
+            fn = self.start_instance if started else self.stop_instance
+            r = await fn(user_id, emulator_name=name)
+            if r.get('success'):
+                acted.append(f"{name}: {'started' if started else 'stopped'}")
+            else:
+                failed.append(f"{name}: {r.get('message', 'failed')}")
+
+        verb = "Start" if started else "Stop"
+        lines = [f"**{verb} all** — {len(names)} emulator(s):"]
+        for grp in (acted, skipped, failed):
+            for line in grp:
+                lines.append(f"• {line}")
+        return {
+            'success': not failed and (bool(acted) or bool(skipped)),
+            'message': "\n".join(lines),
+            'acted': acted, 'skipped': skipped, 'failed': failed,
+        }
+
+    async def start_all(self, user_id: str) -> Dict[str, Any]:
+        """Start every emulator the user owns (already-running ones reported)."""
+        return await self._bulk_action(user_id, "start")
+
+    async def stop_all(self, user_id: str) -> Dict[str, Any]:
+        """Stop every emulator the user owns (already-stopped ones reported)."""
+        return await self._bulk_action(user_id, "stop")
+
     def get_status(self, user_id: str) -> Dict[str, Any]:
         """
         Get bot status for user.

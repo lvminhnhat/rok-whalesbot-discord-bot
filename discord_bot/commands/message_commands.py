@@ -3,19 +3,60 @@ Message-based user commands for Discord bot.
 Users type plain text commands in allowed channels instead of slash commands.
 """
 
+import re
 from datetime import datetime
 
 import discord
+import pytz
 
 from discord_bot.utils.permissions import in_allowed_channel_msg
 from discord_bot.services.bot_service import BotService
 from discord_bot.services.subscription_service import SubscriptionService
+from discord_bot.services.schedule_service import parse_hhmm_to_next_utc
 from shared.data_manager import DataManager
 from shared.constants import ActionType, ActionResult
 
 
 # Commands that the bot recognizes (no prefix)
-COMMANDS = {'start', 'stop', 'status', 'expiry', 'link', 'help', 'queue', 'view'}
+COMMANDS = {'start', 'stop', 'status', 'expiry', 'link', 'help', 'queue', 'view',
+            'schedules', 'unschedule'}
+
+# Loose HH:MM shape - used only to tell "you tried to give a time but it's
+# malformed" from "this is an emulator name".
+_LOOSE_TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _split_target_time(args: str):
+    """Split a start/stop argument string into (target, when_dt, time_error).
+
+    target: '' (default emulator), 'all', or an emulator name.
+    when_dt: a UTC datetime if a valid trailing HH:MM was given, else None.
+    time_error: a message if the trailing token looked like a time but was
+                invalid (e.g. '25:00'), else None.
+    """
+    toks = args.split()
+    when = None
+    time_error = None
+    if toks:
+        last = toks[-1]
+        parsed = parse_hhmm_to_next_utc(last)
+        if parsed is not None:
+            when = parsed
+            toks = toks[:-1]
+        elif _LOOSE_TIME_RE.match(last):
+            time_error = (f"`{last}` isn't a valid 24-hour UTC time "
+                          f"(use HH:MM, 00:00-23:59).")
+            toks = toks[:-1]
+    return " ".join(toks).strip(), when, time_error
+
+
+def _normalize_target(target: str):
+    """'' -> None (default emulator), 'all' (any case) -> 'all', else the name."""
+    if not target:
+        return None
+    if target.lower() == "all":
+        return "all"
+    return target
 
 
 def setup_message_commands(
@@ -61,9 +102,9 @@ def setup_message_commands(
         user_id = str(message.author.id)
 
         if command == "start":
-            await handle_start(message, user_id, args, bot_service, data_manager)
+            await handle_start_stop(message, user_id, args, "start", bot, bot_service, data_manager)
         elif command == "stop":
-            await handle_stop(message, user_id, args, bot_service, data_manager)
+            await handle_start_stop(message, user_id, args, "stop", bot, bot_service, data_manager)
         elif command == "status":
             await handle_status(message, user_id, bot_service)
         elif command == "expiry":
@@ -76,54 +117,128 @@ def setup_message_commands(
             await handle_queue(message, user_id, bot)
         elif command == "view":
             await handle_view(message, user_id, args, bot_service, data_manager)
+        elif command == "schedules":
+            await handle_schedules(message, user_id, bot)
+        elif command == "unschedule":
+            await handle_unschedule(message, user_id, args, bot)
 
 
-async def handle_start(
+async def handle_start_stop(
     message: discord.Message,
     user_id: str,
     args: str,
+    action: str,                       # 'start' | 'stop'
+    bot,
     bot_service: BotService,
     data_manager: DataManager
 ):
-    """Handle the start command."""
-    emulator_name = args if args else None
+    """Handle `start`/`stop`, with optional 'all' target and optional trailing
+    HH:MM UTC time (which defers the action instead of running it now).
 
+    Forms:
+        start                 -> start your (default) emulator now
+        start <name>          -> start that emulator now
+        start all             -> start every emulator you own now
+        start [<name>|all] HH:MM  -> schedule it for the next HH:MM UTC
+    """
+    target_raw, when, time_error = _split_target_time(args)
+    if time_error:
+        await message.reply(time_error)
+        return
+    target = _normalize_target(target_raw)
+
+    if when is not None:
+        await _schedule_action(message, user_id, action, target, when, bot, data_manager)
+        return
+
+    action_type = ActionType.START if action == "start" else ActionType.STOP
     async with message.channel.typing():
-        result = await bot_service.start_instance(user_id, emulator_name=emulator_name)
+        result = await bot._execute_user_action(user_id, action, target)
 
+    tgt_desc = "all" if target == "all" else (target or "default")
     data_manager.log_action(
         user_id=user_id,
         user_name=str(message.author),
-        action=ActionType.START,
-        details=f"Emulator start attempt{f' ({emulator_name})' if emulator_name else ''}",
+        action=action_type,
+        details=f"Emulator {action} attempt ({tgt_desc})",
         result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED
     )
-
     await message.reply(result['message'])
 
 
-async def handle_stop(
-    message: discord.Message,
-    user_id: str,
-    args: str,
-    bot_service: BotService,
-    data_manager: DataManager
-):
-    """Handle the stop command."""
-    emulator_name = args if args else None
+def _validate_schedulable(user_id, target, bot_service, data_manager):
+    """Return an error message if this user can't schedule `target`, else None."""
+    is_admin = bot_service._is_admin(user_id)
+    user = data_manager.get_user(user_id)
+    if target == "all":
+        if not user or not user.is_linked:
+            return "You aren't linked to any emulator, so `all` has nothing to act on."
+        return None
+    if target is None:
+        if is_admin and not user:
+            return "Admins must name an emulator (there's no default to schedule)."
+        if not user or not user.is_linked:
+            return "You aren't linked to any emulator. Use `link <name>` first."
+        return None
+    # named emulator
+    if is_admin:
+        return None
+    if not user:
+        return "You don't have access. Please contact admin."
+    if not user.get_emulator_by_name(target):
+        return f'You are not linked to emulator "{target}". Use `link {target}` first.'
+    return None
 
-    async with message.channel.typing():
-        result = await bot_service.stop_instance(user_id, emulator_name=emulator_name)
 
-    data_manager.log_action(
+async def _schedule_action(message, user_id, action, target, when, bot, data_manager):
+    """Persist a deferred start/stop and confirm it."""
+    err = _validate_schedulable(user_id, target, bot.bot_service, data_manager)
+    if err:
+        await message.reply(err)
+        return
+    job = bot.schedule_service.add(
         user_id=user_id,
         user_name=str(message.author),
-        action=ActionType.STOP,
-        details=f"Emulator stop attempt{f' ({emulator_name})' if emulator_name else ''}",
-        result=ActionResult.SUCCESS if result['success'] else ActionResult.FAILED
+        channel_id=message.channel.id,
+        action=action,
+        target=target,
+        when_utc=when,
+    )
+    delta = when - datetime.now(pytz.UTC)
+    mins = max(0, int(delta.total_seconds() // 60))
+    in_txt = f"{mins // 60}h {mins % 60}m" if mins >= 60 else f"{mins}m"
+    await message.reply(
+        f"🗓️ Scheduled **{action} {job.describe_target()}** for "
+        f"<t:{int(when.timestamp())}:t> UTC (in ~{in_txt}). "
+        f"Cancel with `unschedule {job.id}`."
     )
 
-    await message.reply(result['message'])
+
+async def handle_schedules(message: discord.Message, user_id: str, bot):
+    """List the user's pending scheduled actions."""
+    jobs = bot.schedule_service.for_user(user_id)
+    if not jobs:
+        await message.reply("You have no scheduled actions. "
+                            "Schedule one with e.g. `start all 13:00`.")
+        return
+    lines = ["**Your scheduled actions**"]
+    for j in jobs:
+        lines.append(f"• `{j.id}` — {j.action} {j.describe_target()} at "
+                     f"<t:{int(j.when_dt.timestamp())}:f> (<t:{int(j.when_dt.timestamp())}:R>)")
+    lines.append("\nCancel one with `unschedule <id>`.")
+    await message.reply("\n".join(lines))
+
+
+async def handle_unschedule(message: discord.Message, user_id: str, args: str, bot):
+    """Cancel a pending scheduled action by id."""
+    job_id = args.strip().split()[0] if args.strip() else ""
+    if not job_id:
+        await message.reply("Usage: `unschedule <id>` (see ids with `schedules`).")
+        return
+    if bot.schedule_service.remove(job_id, user_id=user_id):
+        await message.reply(f"🗑️ Cancelled scheduled action `{job_id}`.")
+    else:
+        await message.reply(f"No scheduled action `{job_id}` found for you.")
 
 
 async def handle_status(
@@ -272,13 +387,18 @@ async def handle_help(message: discord.Message):
         "**Miner Usage Guide**\n"
         "\n"
         "**Miner Control**\n"
-        "`start` - Start your miner\n"
-        "`start <name>` - Start a specific emulator\n"
-        "`stop` - Stop your miner\n"
-        "`stop <name>` - Stop a specific emulator\n"
+        "`start` / `stop` - Start/stop your miner\n"
+        "`start <name>` / `stop <name>` - A specific emulator\n"
+        "`start all` / `stop all` - Every emulator you own\n"
         "`status` - Check miner status\n"
         "`view <name>` - Screenshot an emulator\n"
         "`expiry` - View subscription info\n"
+        "\n"
+        "**Scheduling (times are UTC, 24-hour)**\n"
+        "`start <name> 13:00` - Start at the next 13:00 UTC\n"
+        "`stop all 14:30` - Stop everything at 14:30 UTC\n"
+        "`schedules` - List your scheduled actions\n"
+        "`unschedule <id>` - Cancel a scheduled action\n"
         "\n"
         "**Emulator Management**\n"
         "`link <emulator_name>` - Link to an emulator\n"
@@ -288,7 +408,8 @@ async def handle_help(message: discord.Message):
         "`help` - Show this help message\n"
         "\n"
         "**Notes**\n"
-        "• Cooldown between start/stop commands\n"
+        "• Already-running/stopped emulators are reported, not toggled\n"
+        "• Scheduled actions survive a bot restart\n"
         "• Bot auto-stops when subscription expires\n"
         "• Contact admin for support"
     )

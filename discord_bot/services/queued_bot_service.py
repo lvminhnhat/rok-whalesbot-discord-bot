@@ -185,7 +185,7 @@ class QueuedBotService:
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self.whalesbot.start, user.emulator_index),
-                        timeout=30.0
+                        timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
                     )
 
                     user.status = InstanceStatus.RUNNING.value
@@ -329,7 +329,7 @@ class QueuedBotService:
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
-                        timeout=30.0
+                        timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
                     )
 
                     user.status = InstanceStatus.STOPPED.value
@@ -508,7 +508,7 @@ class QueuedBotService:
                     if user.is_running:
                         await asyncio.wait_for(
                             asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
-                            timeout=30.0
+                            timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
                         )
 
                     user.status = InstanceStatus.STOPPED.value

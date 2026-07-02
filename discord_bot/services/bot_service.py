@@ -262,7 +262,7 @@ class BotService:
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.whalesbot.start, emulator_index),
-                timeout=30.0
+                timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
             )
 
             if user:
@@ -415,7 +415,7 @@ class BotService:
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.whalesbot.stop, emulator_index),
-                timeout=30.0
+                timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
             )
 
             # Update user status if user record exists
@@ -567,7 +567,7 @@ class BotService:
             if user.is_running:
                 await asyncio.wait_for(
                     asyncio.to_thread(self.whalesbot.stop, user.emulator_index),
-                    timeout=30.0
+                    timeout=120.0   # OCR-anchored locate can take ~1 min for deep rows
                 )
             
             user.status = InstanceStatus.STOPPED.value
@@ -1033,9 +1033,11 @@ class BotService:
                     'message': 'State inconsistency detected. Your miner was started outside Discord. Status synchronized.'
                 }
 
-            # Execute start operation
+            # Execute start operation. to_thread: the OCR-anchored click takes
+            # seconds (longer for accounts deep in the list) and must not block
+            # the event loop / Discord heartbeat.
             try:
-                self.whalesbot.start(emulator_index)
+                await asyncio.to_thread(self.whalesbot.start, emulator_index)
 
                 # Update user status
                 user.status = InstanceStatus.RUNNING.value
@@ -1072,13 +1074,13 @@ class BotService:
             user_name=user.discord_name,
             emulator_index=emulator_index,
             priority=Priority.NORMAL,
-            timeout=60,
+            timeout=120,   # OCR-anchored locate can take ~1 min for deep list rows
             callback=start_operation,
             metadata={'emulator_name': user.emulator_name}
         )
 
         # Wait for operation to complete
-        result = await self.operation_queue.wait_for_operation(operation_id, timeout=120)
+        result = await self.operation_queue.wait_for_operation(operation_id, timeout=150)
 
         if result is None:
             return {
@@ -1149,9 +1151,9 @@ class BotService:
                     'message': 'Your miner is not running.'
                 }
 
-            # Execute stop operation
+            # Execute stop operation (to_thread: see start_operation)
             try:
-                self.whalesbot.stop(emulator_index)
+                await asyncio.to_thread(self.whalesbot.stop, emulator_index)
 
                 # Update user status
                 user.status = InstanceStatus.STOPPED.value
@@ -1193,13 +1195,13 @@ class BotService:
             user_name=user.discord_name,
             emulator_index=emulator_index,
             priority=Priority.HIGH,  # Stop operations have higher priority
-            timeout=45,
+            timeout=120,   # OCR-anchored locate can take ~1 min for deep list rows
             callback=stop_operation,
             metadata={'emulator_name': user.emulator_name}
         )
 
         # Wait for operation to complete
-        result = await self.operation_queue.wait_for_operation(operation_id, timeout=90)
+        result = await self.operation_queue.wait_for_operation(operation_id, timeout=150)
 
         if result is None:
             return {

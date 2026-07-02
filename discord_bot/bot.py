@@ -382,24 +382,28 @@ class WhaleBotDiscord(discord.Bot):
     # Freeze watchdog
     # ------------------------------------------------------------------
     def _running_emulators(self):
-        """[{index, name}] for emulators currently active (state > 0)."""
+        """(running, roster): running = [{index, name}] for emulators currently
+        active (state > 0); roster = ALL account names, used to make OCR name
+        matching reject look-alike accounts (e.g. KatFruit87 vs KatFruit89)."""
         try:
             res = self.bot_service.get_available_emulators()
             if not res.get("success"):
-                return []
-            return [{"index": e["index"], "name": e["name"]}
-                    for e in res.get("emulators", [])
-                    if e.get("is_active") and e.get("name")]
+                return [], []
+            emus = res.get("emulators", [])
+            running = [{"index": e["index"], "name": e["name"]}
+                       for e in emus if e.get("is_active") and e.get("name")]
+            roster = [e["name"] for e in emus if e.get("name")]
+            return running, roster
         except Exception as e:
             print(f"[WATCHDOG] could not list emulators: {e}")
-            return []
+            return [], []
 
-    async def _queued_read(self, index: int, name: str) -> LogReading:
+    async def _queued_read(self, index: int, name: str, roster=None) -> LogReading:
         """Read one account's ACTIVITY LOG through the UI queue at LOW priority,
         so a user's start/stop (NORMAL priority) preempts between reads instead
         of fighting the watchdog for the mouse/window."""
         async def _cb():
-            return await asyncio.to_thread(read_account_log, name)
+            return await asyncio.to_thread(read_account_log, name, None, False, roster)
         try:
             op_id = await self.operation_queue.add_operation(
                 operation_type=OperationType.STATUS_CHECK,
@@ -467,7 +471,7 @@ class WhaleBotDiscord(discord.Bot):
             if self.watchdog_pause_idle > 0 and idle is not None and idle < self.watchdog_pause_idle:
                 print(f"[WATCHDOG] paused — local input {idle:.0f}s ago")
                 return None
-        emus = self._running_emulators()
+        emus, roster = self._running_emulators()
         if not emus:
             return {"swept": 0, "events": []}
         self._watchdog_busy = True
@@ -478,7 +482,7 @@ class WhaleBotDiscord(discord.Bot):
             for emu in emus:
                 if not manual and not self.watchdog_enabled:
                     break  # toggled off mid-sweep
-                reading = await self._queued_read(emu["index"], emu["name"])
+                reading = await self._queued_read(emu["index"], emu["name"], roster)
                 print(f"[WATCHDOG]   {emu['name']} (idx {emu['index']}): "
                       f"ok={reading.ok} ts={reading.latest_ts} err={reading.error}")
                 ev = self.watchdog_service.process_reading(emu["name"], reading)

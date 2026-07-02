@@ -384,54 +384,44 @@ class WhaleBots:
         if emulator_state.is_active:
             raise EmulatorAlreadyRunningError(f"Emulator at index {index}")
 
-        # Calculate click coordinates
-        click_x, click_y, scroll_down = self._calculate_ui_coordinates(index)
-
-        # Perform UI operations
+        # Name-anchored click: locate the account's row by NAME via OCR
+        # (roster-gated + verified) and click its checkbox. Never clicks blind
+        # coordinates - if the row can't be found and verified, this raises
+        # instead of toggling the wrong account.
         try:
-            # Scroll to the emulator position
-            self.ui_controller.scroll(
-                self.config.ui.scroll_position_x,
-                self.config.ui.scroll_position_y,
-                up=self.config.ui.default_scroll_up,
-                down=scroll_down
-            )
-
-            # Click to start
-            success = self.ui_controller.click(click_x, click_y)
-            if not success:
-                raise WindowError(f"Failed to click at coordinates ({click_x}, {click_y})")
+            result = self._click_account_row(emulator_state.emulator_info.name)
+            if not result.get("success"):
+                raise WindowError(result.get("error") or "row not located")
 
             # Update state
             self.state_manager.set_emulator_active(index)
 
-            self.logger.info(f"Started emulator at index {index}")
+            self.logger.info(
+                f"Started emulator at index {index} "
+                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')})"
+            )
 
         except Exception as e:
             raise WindowError(f"Failed to start emulator at index {index}: {e}")
 
-    def _calculate_ui_coordinates(self, index: int) -> Tuple[int, int, int]:
+    def _click_account_row(self, name: str) -> dict:
+        """Click the start/stop checkbox of the account named `name`,
+        locating the row by OCR instead of fixed coordinates.
+
+        The full roster (every account name from Accounts.json) is passed so
+        the matcher can reject look-alike names (e.g. KatFruit87 vs
+        KatFruit89): a row is only accepted when it matches the target
+        STRICTLY better than any other real account, and it is re-verified at
+        high magnification before the click.
         """
-        Calculate UI coordinates for emulator interaction.
+        try:
+            from .services.watchdog_reader import click_account_checkbox
+        except ImportError:
+            from whalebots_automation.services.watchdog_reader import click_account_checkbox
 
-        Args:
-            index: Emulator index
-
-        Returns:
-            Tuple of (click_x, click_y, scroll_down)
-        """
-        if index <= self.config.ui.max_visible_items - 1:
-            # Visible without scrolling
-            click_y = self.config.ui.base_y_coordinate + self.config.ui.step_size * index
-            scroll_down = 0
-        else:
-            # Need to scroll down
-            click_y = self.config.ui.base_y_coordinate + self.config.ui.step_size * (self.config.ui.max_visible_items - 1 )
-            scroll_down = index - (self.config.ui.max_visible_items - 1)
-
-        click_x = self.config.ui.base_x_coordinate
-
-        return click_x, click_y, scroll_down
+        roster = [s.emulator_info.name for s in self.state_manager.get_emulator_states()
+                  if s.emulator_info.name]
+        return click_account_checkbox(name, roster=roster)
 
     @log_performance()
     def start(self, device: Union[str, int]) -> None:
@@ -500,28 +490,20 @@ class WhaleBots:
         if not emulator_state.is_active:
             raise EmulatorNotRunningError(f"Emulator at index {index}")
 
-        # Calculate click coordinates (same as start)
-        click_x, click_y, scroll_down = self._calculate_ui_coordinates(index)
-
-        # Perform UI operations
+        # Name-anchored click (see _start_by_index): the checkbox toggles, so
+        # start and stop click the same located spot.
         try:
-            # Scroll to the emulator position
-            self.ui_controller.scroll(
-                self.config.ui.scroll_position_x,
-                self.config.ui.scroll_position_y,
-                up=self.config.ui.default_scroll_up,
-                down=scroll_down
-            )
-
-            # Click to stop
-            success = self.ui_controller.click(click_x, click_y)
-            if not success:
-                raise WindowError(f"Failed to click at coordinates ({click_x}, {click_y})")
+            result = self._click_account_row(emulator_state.emulator_info.name)
+            if not result.get("success"):
+                raise WindowError(result.get("error") or "row not located")
 
             # Update state
             self.state_manager.set_emulator_inactive(index)
 
-            self.logger.info(f"Stopped emulator at index {index}")
+            self.logger.info(
+                f"Stopped emulator at index {index} "
+                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')})"
+            )
 
         except Exception as e:
             raise WindowError(f"Failed to stop emulator at index {index}: {e}")

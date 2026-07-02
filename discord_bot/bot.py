@@ -4,7 +4,6 @@ Discord bot main application.
 
 import os
 import asyncio
-import ctypes
 from datetime import datetime, timedelta
 import pytz
 import discord
@@ -16,6 +15,7 @@ from discord_bot.services.bot_service import BotService
 from discord_bot.services.subscription_service import SubscriptionService
 from discord_bot.services.ui_operation_queue import (
     UIOperationQueue, OperationType, Priority, OperationStatus,
+    _seconds_since_last_input,
 )
 from discord_bot.services.watchdog_service import WatchdogService, WatchEvent
 from whalebots_automation.services.watchdog_reader import read_account_log, LogReading
@@ -32,24 +32,6 @@ from discord_bot.commands.admin_commands import setup_admin_commands
 # Freeze-watchdog tuning
 WATCHDOG_INTERVAL_MIN = 3            # how often to sweep running instances
 WATCHDOG_PAUSE_IDLE_SECONDS = 120   # skip a sweep if local input happened within this window
-
-
-def _seconds_since_last_input():
-    """Seconds since the last local mouse/keyboard input, or None if unavailable.
-
-    Used to auto-pause the watchdog while someone is physically using the host
-    (so its mouse takeover never fights the user)."""
-    try:
-        class _LASTINPUTINFO(ctypes.Structure):
-            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
-        info = _LASTINPUTINFO()
-        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
-        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-            return None
-        tick = ctypes.windll.kernel32.GetTickCount()
-        return max(0.0, (tick - info.dwTime) / 1000.0)
-    except Exception:
-        return None
 
 
 class WhaleBotDiscord(discord.Bot):

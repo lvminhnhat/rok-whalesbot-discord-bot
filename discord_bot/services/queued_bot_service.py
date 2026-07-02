@@ -150,16 +150,17 @@ class QueuedBotService:
                         'message': f'Error checking emulator state: {str(e)}'
                     }
 
-                # Check for state inconsistency
+                # Check for state inconsistency: database says RUNNING but the
+                # emulator is actually stopped. Sync the status and FALL THROUGH
+                # to start it in this same operation (previously this returned
+                # "please try again", forcing a second manual command).
+                sync_note = ""
                 if user.is_running and not actual_emulator_state:
-                    print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing...")
+                    print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing and starting...")
                     user.status = InstanceStatus.STOPPED.value
                     user.last_stop = datetime.now(pytz.UTC).isoformat()
                     self.data_manager.save_user(user)
-                    return {
-                        'success': False,
-                        'message': 'State inconsistency detected. Status synchronized. Please try again.'
-                    }
+                    sync_note = "\n(state was out of sync — auto-corrected)"
 
                 # Check if already running
                 if user.is_running and actual_emulator_state:
@@ -194,7 +195,7 @@ class QueuedBotService:
 
                     return {
                         'success': True,
-                        'message': f'Miner started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days'
+                        'message': f'Miner started successfully!\nEmulator: {user.emulator_index}\nTime left: {user.subscription.days_left} days{sync_note}'
                     }
 
                 except asyncio.TimeoutError:

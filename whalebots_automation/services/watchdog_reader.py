@@ -877,7 +877,8 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
 def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
                            win: Optional[ROKWindow] = None,
                            dry_run: bool = False,
-                           ensure: Optional[str] = None) -> dict:
+                           ensure: Optional[str] = None,
+                           confirm_timeout: float = 12.0) -> dict:
     """Locate an account row by NAME and click its start/stop checkbox.
 
     This is the name-anchored replacement for the old fixed-coordinate
@@ -893,7 +894,10 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
     direction-safe: if the checkbox already shows the desired end state (the
     state file was out of sync with the GUI), we DON'T click - a blind toggle
     would flip a running instance off / a stopped one on. After a real click
-    the checkbox is re-read to confirm it reached the desired state.
+    the checkbox is POLLED (up to `confirm_timeout` s) until it reaches the
+    desired state - starting an emulator can take several seconds for the
+    checkbox to visibly tick, so a single fast read would wrongly report
+    failure on a start that actually succeeded.
 
     Returns {'success', 'error', 'matched_text', 'clicked_at', 'noop',
     'checkbox'}. With dry_run=True everything runs except the click.
@@ -937,15 +941,24 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
         win.click_client(*cb)
         time.sleep(0.5)
         res["clicked_at"] = cb
-        # Post-click confirmation: the checkbox must now show the desired state.
+        # Post-click confirmation: POLL the checkbox until it reaches the
+        # desired state. Starting an emulator can take several seconds for the
+        # tick to appear (and the box may read ambiguous mid-transition), so a
+        # single fast read would wrongly fail a start that actually worked.
         if ensure in ("checked", "unchecked"):
-            after = _checkbox_state(win.capture(), nm.cy, m)
-            res["checkbox"] = after
             want = (ensure == "checked")
-            if after is not None and after != want:
-                return {**res, "error": f"clicked, but checkbox reads "
-                        f"{'ticked' if after else 'unticked'} instead of "
-                        f"{'ticked' if want else 'unticked'} - inspect the GUI"}
+            after = _checkbox_state(win.capture(), nm.cy, m)
+            deadline = time.time() + max(0.0, confirm_timeout)
+            while after != want and time.time() < deadline:
+                time.sleep(1.0)
+                after = _checkbox_state(win.capture(), nm.cy, m)
+            res["checkbox"] = after
+            if after != want:
+                shown = ("ticked" if after else "unticked" if after is False
+                         else "unreadable")
+                return {**res, "error": f"clicked, but checkbox still reads "
+                        f"{shown} instead of {'ticked' if want else 'unticked'} "
+                        f"after {int(confirm_timeout)}s - inspect the GUI"}
         return {**res, "success": True}
     finally:
         if prepared:

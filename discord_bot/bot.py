@@ -69,6 +69,7 @@ class WhaleBotDiscord(discord.Bot):
         # Freeze watchdog (per-account log monitoring)
         self.watchdog_service = WatchdogService()
         self._watchdog_busy = False
+        self._watchdog_skip_next = False  # set after a manual /watchdog start
         self.watchdog_enabled = os.getenv("WATCHDOG_ENABLED", "1").strip().lower() not in ("0", "false", "no")
         try:
             self.watchdog_interval_min = max(1, int(os.getenv("WATCHDOG_INTERVAL_MIN", str(WATCHDOG_INTERVAL_MIN))))
@@ -446,28 +447,36 @@ class WhaleBotDiscord(discord.Bot):
         except Exception as e:
             print(f"[WATCHDOG] failed to send alert: {e}")
 
-    @tasks.loop(minutes=WATCHDOG_INTERVAL_MIN)
-    async def freeze_watchdog(self):
-        """Sweep running instances (reads serialized via the UI queue) and alert
-        on frozen/stuck ones. Each account read is a LOW-priority queue op, so
-        user start/stop commands jump ahead between reads."""
+    async def _watchdog_sweep(self, manual: bool = False):
+        """Run one freeze-check sweep (reads serialized via the UI queue at LOW
+        priority, so user start/stop commands jump ahead between reads).
+
+        Returns {'swept': n, 'events': [WatchEvent, ...]} or None if skipped
+        (another sweep running, or - for scheduled sweeps - disabled/paused).
+        `manual` bypasses the enabled and local-input pause checks: an explicit
+        /watchdog start is an intentional request, and the UI queue's idle gate
+        still keeps the reads from fighting a local user for the mouse.
+        """
         if self._watchdog_busy:
-            print("[WATCHDOG] previous sweep still running; skipping this tick")
-            return
-        try:
+            print("[WATCHDOG] previous sweep still running; skipping")
+            return None
+        if not manual:
             if not self.watchdog_enabled:
-                return
+                return None
             idle = _seconds_since_last_input()
             if self.watchdog_pause_idle > 0 and idle is not None and idle < self.watchdog_pause_idle:
                 print(f"[WATCHDOG] paused — local input {idle:.0f}s ago")
-                return
-            emus = self._running_emulators()
-            if not emus:
-                return
-            self._watchdog_busy = True
-            print(f"[WATCHDOG] sweeping {len(emus)} instance(s)...")
+                return None
+        emus = self._running_emulators()
+        if not emus:
+            return {"swept": 0, "events": []}
+        self._watchdog_busy = True
+        events = []
+        try:
+            print(f"[WATCHDOG] sweeping {len(emus)} instance(s)"
+                  f"{' (manual)' if manual else ''}...")
             for emu in emus:
-                if not self.watchdog_enabled:
+                if not manual and not self.watchdog_enabled:
                     break  # toggled off mid-sweep
                 reading = await self._queued_read(emu["index"], emu["name"])
                 print(f"[WATCHDOG]   {emu['name']} (idx {emu['index']}): "
@@ -475,11 +484,23 @@ class WhaleBotDiscord(discord.Bot):
                 ev = self.watchdog_service.process_reading(emu["name"], reading)
                 if ev:
                     print(f"[WATCHDOG] {ev.kind}: {ev.name} — {ev.reason}")
+                    events.append(ev)
                     await self._send_watchdog_alert(ev)
         except Exception as e:
-            print(f"[ERROR] freeze_watchdog: {e}")
+            print(f"[ERROR] watchdog sweep: {e}")
         finally:
             self._watchdog_busy = False
+        return {"swept": len(emus), "events": events}
+
+    @tasks.loop(minutes=WATCHDOG_INTERVAL_MIN)
+    async def freeze_watchdog(self):
+        if self._watchdog_skip_next:
+            # A manual /watchdog start just finished and restarted this loop;
+            # consume the immediate post-restart tick so the next automatic
+            # sweep lands a full interval after the manual one.
+            self._watchdog_skip_next = False
+            return
+        await self._watchdog_sweep(manual=False)
 
     @freeze_watchdog.before_loop
     async def before_freeze_watchdog(self):
@@ -489,10 +510,10 @@ class WhaleBotDiscord(discord.Bot):
         bot = self
 
         @bot.slash_command(name="watchdog",
-                           description="Turn the freeze watchdog on/off or check status")
+                           description="Freeze watchdog: on/off, status, or run a check now")
         async def watchdog(ctx: discord.ApplicationContext,
-                           action: discord.Option(str, "on / off / status / test",
-                                                   choices=["on", "off", "status", "test"]) = "status"):
+                           action: discord.Option(str, "on / off / status / start / test",
+                                                   choices=["on", "off", "status", "start", "test"]) = "status"):
             if not is_admin(ctx):
                 await ctx.respond("You don't have permission to use this.", ephemeral=True)
                 return
@@ -503,6 +524,37 @@ class WhaleBotDiscord(discord.Bot):
                 bot.watchdog_enabled = False
                 await ctx.respond("⏸️ Freeze watchdog **disabled** — it won't touch the mouse.",
                                   ephemeral=True)
+            elif action == "start":
+                if bot._watchdog_busy:
+                    await ctx.respond("⏳ A sweep is already running — results will post as usual.",
+                                      ephemeral=True)
+                    return
+                await ctx.respond(
+                    f"🔍 Freeze check started. The next automatic check moves to "
+                    f"~{bot.watchdog_interval_min} min after this one finishes.",
+                    ephemeral=True)
+
+                async def _manual_sweep():
+                    summary = await bot._watchdog_sweep(manual=True)
+                    # Reschedule the loop so the next auto sweep is a full
+                    # interval away (the immediate post-restart tick is skipped).
+                    if bot.freeze_watchdog.is_running():
+                        bot._watchdog_skip_next = True
+                        bot.freeze_watchdog.restart()
+                    if summary is None:
+                        msg = "⚠️ Sweep skipped — another sweep was already running."
+                    elif summary["swept"] == 0:
+                        msg = "ℹ️ Freeze check done — no running instances to check."
+                    else:
+                        flagged = [f"**{e.name}** ({e.kind})" for e in summary["events"]]
+                        msg = (f"✅ Freeze check done — {summary['swept']} instance(s) checked; "
+                               + (f"flagged: {', '.join(flagged)}" if flagged else "nothing flagged."))
+                    try:
+                        await ctx.followup.send(msg, ephemeral=True)
+                    except Exception as e:
+                        print(f"[WATCHDOG] manual sweep summary not delivered: {e} — {msg}")
+
+                asyncio.create_task(_manual_sweep())
             elif action == "test":
                 await bot._send_watchdog_alert(WatchEvent(
                     name="TEST", kind="frozen",

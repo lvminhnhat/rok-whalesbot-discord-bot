@@ -142,6 +142,8 @@ TITLE_SUBSTR = "Rise of Kingdoms Bot"
 # this are the status / resource columns. The list columns are left-anchored,
 # so this tracks text size (DPI), not window width.
 BASE_NAME_MAX_X = 160
+# x of the per-row start/stop checkbox (leftmost column, before the name).
+BASE_CHECKBOX_X = 16
 # Words within this y-distance belong to the same log row (~22px pitch at 100%).
 BASE_ROW_TOL = 6.5
 
@@ -479,27 +481,58 @@ def _edit_dist(a: str, b: str) -> int:
     return prev[lb]
 
 
-def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors) -> Optional[Word]:
+def _tol(n: int) -> int:
+    """Edit-distance tolerance for a target of normalized length n."""
+    return 1 if n <= 5 else max(1, n // 4)
+
+
+def _other_names(name: str, roster: Optional[List[str]]) -> List[str]:
+    """Normalized roster names EXCLUDING the target."""
+    t = _norm(name)
+    return [nr for r in (roster or []) if (nr := _norm(r)) and nr != t]
+
+
+def _roster_gate(word_norm: str, d_target: int, others: List[str]) -> bool:
+    """True if no OTHER account's name explains this OCR word at least as well
+    as the target does.
+
+    This is what makes matching safe with sibling accounts: looking for
+    'KatFruit87' while 'KatFruit89' is on screen, the word 'katfruit89' is
+    distance 1 from the target but distance 0 from the other roster name, so
+    it is rejected (it IS that other account). Requires a STRICTLY better fit
+    for the target."""
+    return all(_edit_dist(word_norm, o) > d_target for o in others)
+
+
+def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors,
+               roster: Optional[List[str]] = None) -> Optional[Word]:
     """Find an account name in the list's name column, tolerant of OCR noise
-    (OCR routinely garbles a character, e.g. 'Duc' -> 'ouc', 'MinHe' -> 'Mir,He')."""
+    (OCR routinely garbles a character, e.g. 'Duc' -> 'ouc', 'MinHe' -> 'Mir,He').
+
+    `roster` is the full list of real account names; every match rule is gated
+    on the word not fitting some OTHER account at least as well (see
+    _roster_gate). Without it, near-identical names can cross-match."""
     t = _norm(name)
     n = len(t)
+    others = _other_names(name, roster)
     cands = [w for w in words
              if w.cy <= a.list_y_max and w.cx < m.name_max_x
              and any(c.isalpha() for c in w.text)]
 
     # 1) exact (normalized)
     for w in cands:
-        if _norm(w.text) == t:
+        wt = _norm(w.text)
+        if wt == t and _roster_gate(wt, 0, others):
             return w
     # 2) prefix (>=3) / substring (>=4) - OCR clipping/merging
     for w in cands:
         wt = _norm(w.text)
         if wt and ((n >= 3 and wt.startswith(t)) or (n >= 4 and t in wt)):
-            return w
+            if _roster_gate(wt, _edit_dist(t, wt), others):
+                return w
     # 3) fuzzy: closest by edit distance, within tolerance and UNambiguously best
-    tol = 1 if n <= 5 else max(1, n // 4)
-    best = best_w = None
+    tol = _tol(n)
+    best_w = None
     best_d = second_d = 99
     for w in cands:
         wt = _norm(w.text)
@@ -510,9 +543,74 @@ def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors) -> Optional
             second_d, best_d, best_w = best_d, d, w
         elif d < second_d:
             second_d = d
-    if best_w is not None and best_d <= tol and best_d < second_d:
+    if (best_w is not None and best_d <= tol and best_d < second_d
+            and _roster_gate(_norm(best_w.text), best_d, others)):
         return best_w
     return None
+
+
+def _verify_row(img, w: Word, name: str, m: Metrics,
+                roster: Optional[List[str]] = None) -> bool:
+    """Confirm a matched row really shows the target name before it is acted
+    on: crop just that row's name cell and re-OCR it at double magnification.
+
+    Defends against one-shot OCR misreads (a digit read wrong at normal scale
+    usually resolves correctly when magnified). A verification failure means
+    "treat as not found" - callers must never click an unverified row."""
+    pad = round(6 * m.scale)
+    box = (0, max(0, w.y - pad),
+           min(img.width, m.name_max_x + pad),
+           min(img.height, w.y + w.h + pad))
+    try:
+        words2, _lines = ocr_image(img.crop(box), scale=min(8, m.ocr_scale * 2))
+    except Exception:
+        return False
+    t = _norm(name)
+    others = _other_names(name, roster)
+    tol = _tol(len(t))
+    for w2 in words2:
+        wt = _norm(w2.text)
+        if not wt:
+            continue
+        d = _edit_dist(t, wt)
+        if d <= tol and _roster_gate(wt, d, others):
+            return True
+    return False
+
+
+def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
+                roster: Optional[List[str]] = None):
+    """Page through the account list from the top until the target row is
+    found AND verified (see _verify_row).
+
+    Returns (word, seen, error): `word` is the verified name-cell Word or None;
+    `seen` is every list-row word encountered (for diagnostics); `error` is a
+    fatal reason (occlusion) or None."""
+    win.scroll_to_top(a.list_scroll)
+    last_keys = None
+    seen = set()
+    for _ in range(18):      # ~18 pages * ~2-4 rows >> max account count
+        img = win.capture()
+        words, _lines = ocr_image(img, scale=m.ocr_scale)
+        if not _has_anchors(words):
+            return None, seen, "window occluded (no ROKBot anchors visible)"
+        for w in words:
+            if w.cy <= a.list_y_max and len(w.text) >= 2:
+                seen.add(w.text)
+        nm = _find_name(words, name, m, a, roster)
+        if nm is not None:
+            if _verify_row(img, nm, name, m, roster):
+                return nm, seen, None
+            print(f"[READER] '{nm.text}' matched '{name}' but FAILED high-scale "
+                  f"verification - not clicking; continuing search")
+        keys = frozenset(_norm(w.text) for w in words
+                         if w.cy <= a.list_y_max and w.cx < m.name_max_x
+                         and any(c.isalpha() for c in w.text))
+        if last_keys is not None and keys == last_keys:
+            break            # view didn't change after scrolling -> bottom reached
+        last_keys = keys
+        win.scroll(*a.list_scroll, -2)   # page down ~2-4 rows (overlap, no skip)
+    return None, seen, None
 
 
 def _find_log_tab(words: List[Word], m: Metrics) -> Optional[Tuple[int, int]]:
@@ -569,10 +667,33 @@ def _latest_ts(lines: List[str]) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
-# Main entry: read one account's log
+# Shared setup + main entries
 # --------------------------------------------------------------------------
+def _prepare_window(win: ROKWindow):
+    """OCR the freshly prepared window and locate the layout anchors.
+    Returns (anchors, error): anchors is None when error is set."""
+    m = win.m                # text metrics for this window's monitor scale
+    words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
+    if not _has_anchors(words):
+        return None, "window occluded (no ROKBot anchors visible)"
+    anch = _find_anchors(words, m)
+    if anch is None:
+        return None, "ACTIVITY LOG tab not visible - enlarge the ROKBot window"
+    return anch, None
+
+
+def _not_found_error(name: str, seen) -> str:
+    name_like = sorted({w for w in seen if any(c.isalpha() for c in w)})
+    sample = ", ".join(name_like[:60])
+    return f"account '{name}' not found/verified in list. names seen: {sample}"
+
+
 def read_account_log(name: str, win: Optional[ROKWindow] = None,
-                     keep_topmost: bool = False) -> LogReading:
+                     keep_topmost: bool = False,
+                     roster: Optional[List[str]] = None) -> LogReading:
+    """Read one account's ACTIVITY LOG. `roster` (all real account names)
+    hardens the name matching against sibling accounts - always pass it when
+    available."""
     prev_dpi = set_thread_dpi_aware()
     win = win or ROKWindow()
     if not win.find():
@@ -582,54 +703,25 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
     try:
         win.prepare()
         prepared = True
+        m = win.m
+        anch, err = _prepare_window(win)
+        if err:
+            return LogReading(name, False, error=err)
 
-        # 0) locate the layout anchors. The panel regions depend on the user's
-        #    window size (which we never change), so read them off the first OCR.
-        m = win.m                # text metrics for this window's monitor scale
-        words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
-        if not _has_anchors(words):
-            return LogReading(name, False, error="window occluded (no ROKBot anchors visible)")
-        anch = _find_anchors(words, m)
-        if anch is None:
-            return LogReading(name, False,
-                              error="ACTIVITY LOG tab not visible - enlarge the ROKBot window")
-
-        # 1) select the account. ALWAYS reset to the top first (the list may have
-        #    been left scrolled anywhere by an interleaved start/stop), then page
-        #    DOWN a couple of rows at a time until we find it or hit the bottom.
-        win.scroll_to_top(anch.list_scroll)
-        selected = False
-        last_keys = None
-        seen = set()             # every list-row word seen (for diagnosis if not found)
-        for _ in range(18):      # ~18 pages * ~2-4 rows >> max account count
-            words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
-            if not _has_anchors(words):
-                return LogReading(name, False, error="window occluded (no ROKBot anchors visible)")
-            for w in words:
-                if w.cy <= anch.list_y_max and len(w.text) >= 2:
-                    seen.add(w.text)
-            nm = _find_name(words, name, m, anch)
-            if nm:
-                win.click_client(nm.cx, nm.cy)
-                time.sleep(0.4)
-                selected = True
-                break
-            keys = frozenset(_norm(w.text) for w in words
-                             if w.cy <= anch.list_y_max and w.cx < m.name_max_x and any(c.isalpha() for c in w.text))
-            if last_keys is not None and keys == last_keys:
-                break            # view didn't change after scrolling -> bottom reached
-            last_keys = keys
-            win.scroll(*anch.list_scroll, -2)   # page down ~2-4 rows (overlap, no skip)
-        if not selected:
+        # 1) select the account: page from the top until the row is found AND
+        #    verified, then click its NAME cell (selects the account).
+        nm, seen, err = _locate_row(win, name, m, anch, roster)
+        if err:
+            return LogReading(name, False, error=err)
+        if nm is None:
             try:
                 win.capture().save(rf"C:\Users\binlo\rok_notfound_{name}.png")
             except Exception:
                 pass
-            name_like = sorted({w for w in seen if any(c.isalpha() for c in w)})
-            sample = ", ".join(name_like[:60])
             return LogReading(name, False,
-                              error=f"account '{name}' not found in list "
-                                    f"(png saved). names seen: {sample}")
+                              error=_not_found_error(name, seen) + " (png saved)")
+        win.click_client(nm.cx, nm.cy)
+        time.sleep(0.4)
 
         # 2) ensure ACTIVITY LOG tab is active
         words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
@@ -661,13 +753,97 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
         restore_thread_dpi(prev_dpi)
 
 
+def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
+                           win: Optional[ROKWindow] = None,
+                           dry_run: bool = False) -> dict:
+    """Locate an account row by NAME and click its start/stop checkbox.
+
+    This is the name-anchored replacement for the old fixed-coordinate
+    start/stop clicking (y = base + step*index + scroll notches), which could
+    silently hit the wrong row: the list's row pitch varies with display
+    scaling, one wheel notch scrolls 1-2 rows (not exactly 1), and the
+    process-wide DPI-awareness call it relied on silently failed. Here the row
+    is found by OCR (roster-gated), re-verified at high magnification, and
+    only then clicked - if the name can't be found and verified, we return an
+    error and click NOTHING.
+
+    Returns {'success', 'error', 'matched_text', 'clicked_at'}. With
+    dry_run=True everything runs except the click (for safe live testing).
+    """
+    prev_dpi = set_thread_dpi_aware()
+    win = win or ROKWindow()
+    if not win.find():
+        restore_thread_dpi(prev_dpi)
+        return {"success": False, "error": "ROKBot window not found",
+                "matched_text": None, "clicked_at": None}
+    prepared = False
+    try:
+        win.prepare()
+        prepared = True
+        m = win.m
+        anch, err = _prepare_window(win)
+        if err:
+            return {"success": False, "error": err,
+                    "matched_text": None, "clicked_at": None}
+        nm, seen, err = _locate_row(win, name, m, anch, roster)
+        if err:
+            return {"success": False, "error": err,
+                    "matched_text": None, "clicked_at": None}
+        if nm is None:
+            try:
+                win.capture().save(rf"C:\Users\binlo\rok_notfound_{name}.png")
+            except Exception:
+                pass
+            return {"success": False,
+                    "error": _not_found_error(name, seen) + " (png saved)",
+                    "matched_text": None, "clicked_at": None}
+        cb = (round(BASE_CHECKBOX_X * m.scale), nm.cy)
+        if not dry_run:
+            win.click_client(*cb)
+            time.sleep(0.3)
+        return {"success": True, "error": None,
+                "matched_text": nm.text, "clicked_at": cb}
+    finally:
+        if prepared:
+            try:
+                win.restore_placement()
+            except Exception:
+                pass
+        restore_thread_dpi(prev_dpi)
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--account", help="account/emulator display name to read")
     ap.add_argument("--dump", action="store_true",
                     help="prepare window + scroll to top + print ALL OCR words (no clicks)")
+    ap.add_argument("--locate", metavar="NAME",
+                    help="locate NAME's row with roster-gated matching + high-scale "
+                         "verification, print where the checkbox click WOULD land "
+                         "(no click)")
+    ap.add_argument("--accounts-json",
+                    default=r"C:\Program Files (x86)\Whalebots\Apps\rise-of-kingdoms-bot"
+                            r"\Settings\Accounts.json",
+                    help="Accounts.json to load the roster from (for --locate)")
     args = ap.parse_args()
+
+    if args.locate:
+        import json as _json
+        roster = []
+        try:
+            _data = _json.loads(open(args.accounts_json, encoding="utf-8-sig").read())
+            roster = [a.get("emuInfo", {}).get("name", "") for a in _data]
+            roster = [r for r in roster if r]
+        except Exception as e:
+            print(f"(roster unavailable: {e} — matching without roster gate)")
+        print(f"roster ({len(roster)}): {roster}")
+        res = click_account_checkbox(args.locate, roster=roster, dry_run=True)
+        print(f"success     : {res['success']}")
+        print(f"matched_text: {res['matched_text']}")
+        print(f"would click : {res['clicked_at']}")
+        print(f"error       : {res['error']}")
+        raise SystemExit(0 if res["success"] else 1)
 
     if args.dump:
         set_thread_dpi_aware()

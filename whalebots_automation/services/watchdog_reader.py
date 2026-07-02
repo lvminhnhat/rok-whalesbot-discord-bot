@@ -270,6 +270,7 @@ class LogReading:
     lines: List[str] = field(default_factory=list)
     bad_states: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    running: Optional[bool] = None           # GUI checkbox state (None = not determined)
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +464,24 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
 
+# OCR-confusable glyph classes, folded to one canonical member. '1' vs 'l' is
+# the killer: they're near-identical in this font at ANY magnification, so
+# 'Piltong1' chronically reads as 'Piltongl' and stays edit-distance 1 from
+# Piltong1/2/3 alike - unmatchable under the strict roster gate. Folding is
+# applied to BOTH sides of every comparison, so target, sibling and OCR word
+# all land in the same space and only REAL differences (like the 2 in
+# Piltong2) count. (7 and 9 don't fold together, so KatFruit87 vs KatFruit89
+# still can't cross-match.)
+_CONFUSABLE = str.maketrans({"l": "1", "i": "1", "o": "0", "s": "5",
+                             "b": "8", "z": "2", "g": "9"})
+
+
+def _fold(s: str) -> str:
+    """_norm + confusable-glyph folding: the string space all name-match
+    comparisons happen in."""
+    return _norm(s).translate(_CONFUSABLE)
+
+
 def _edit_dist(a: str, b: str) -> int:
     """Levenshtein distance (small strings)."""
     if a == b:
@@ -487,9 +506,9 @@ def _tol(n: int) -> int:
 
 
 def _other_names(name: str, roster: Optional[List[str]]) -> List[str]:
-    """Normalized roster names EXCLUDING the target."""
-    t = _norm(name)
-    return [nr for r in (roster or []) if (nr := _norm(r)) and nr != t]
+    """Folded roster names EXCLUDING the target."""
+    t = _fold(name)
+    return [nr for r in (roster or []) if (nr := _fold(r)) and nr != t]
 
 
 def _roster_gate(word_norm: str, d_target: int, others: List[str]) -> bool:
@@ -511,22 +530,24 @@ def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors,
 
     `roster` is the full list of real account names; every match rule is gated
     on the word not fitting some OTHER account at least as well (see
-    _roster_gate). Without it, near-identical names can cross-match."""
-    t = _norm(name)
+    _roster_gate). Without it, near-identical names can cross-match. All
+    comparisons happen in _fold space so OCR-confusable glyphs (1/l, 0/o, ...)
+    can't defeat a match OR fake one."""
+    t = _fold(name)
     n = len(t)
     others = _other_names(name, roster)
     cands = [w for w in words
              if w.cy <= a.list_y_max and w.cx < m.name_max_x
              and any(c.isalpha() for c in w.text)]
 
-    # 1) exact (normalized)
+    # 1) exact (folded)
     for w in cands:
-        wt = _norm(w.text)
+        wt = _fold(w.text)
         if wt == t and _roster_gate(wt, 0, others):
             return w
     # 2) prefix (>=3) / substring (>=4) - OCR clipping/merging
     for w in cands:
-        wt = _norm(w.text)
+        wt = _fold(w.text)
         if wt and ((n >= 3 and wt.startswith(t)) or (n >= 4 and t in wt)):
             if _roster_gate(wt, _edit_dist(t, wt), others):
                 return w
@@ -535,7 +556,7 @@ def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors,
     best_w = None
     best_d = second_d = 99
     for w in cands:
-        wt = _norm(w.text)
+        wt = _fold(w.text)
         if not wt or abs(len(wt) - n) > tol:
             continue
         d = _edit_dist(t, wt)
@@ -544,8 +565,35 @@ def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors,
         elif d < second_d:
             second_d = d
     if (best_w is not None and best_d <= tol and best_d < second_d
-            and _roster_gate(_norm(best_w.text), best_d, others)):
+            and _roster_gate(_fold(best_w.text), best_d, others)):
         return best_w
+    return None
+
+
+def _checkbox_state(img, cy: int, m: Metrics) -> Optional[bool]:
+    """Read the start/stop checkbox of the row at `cy` from pixels: True =
+    ticked (instance running), False = unticked, None = ambiguous (callers
+    must not act on None).
+
+    Samples only the checkbox INTERIOR so a selected row's blue highlight
+    around the box can't skew the reading. Calibrated on real captures:
+    ticked interiors are a bright/saturated fill (bright >= 0.21, sat >= 0.48
+    measured), unticked interiors are uniformly dark (0.00/0.00) - the
+    thresholds sit far from both clusters."""
+    cx = round(BASE_CHECKBOX_X * m.scale)
+    half = max(4, round(5 * m.scale))
+    box = img.crop((max(0, cx - half), max(0, cy - half), cx + half, cy + half))
+    raw = box.convert("RGB").tobytes()
+    px = [(raw[i], raw[i + 1], raw[i + 2]) for i in range(0, len(raw), 3)]
+    if not px:
+        return None
+    n = len(px)
+    bright = sum(1 for r, g, b in px if r + g + b > 380) / n
+    sat = sum(1 for r, g, b in px if max(r, g, b) - min(r, g, b) > 40) / n
+    if bright >= 0.10 or sat >= 0.15:
+        return True
+    if bright <= 0.04 and sat <= 0.06:
+        return False
     return None
 
 
@@ -565,11 +613,11 @@ def _verify_row(img, w: Word, name: str, m: Metrics,
         words2, _lines = ocr_image(img.crop(box), scale=min(8, m.ocr_scale * 2))
     except Exception:
         return False
-    t = _norm(name)
+    t = _fold(name)
     others = _other_names(name, roster)
     tol = _tol(len(t))
     for w2 in words2:
-        wt = _norm(w2.text)
+        wt = _fold(w2.text)
         if not wt:
             continue
         d = _edit_dist(t, wt)
@@ -583,9 +631,19 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
     """Page through the account list from the top until the target row is
     found AND verified (see _verify_row).
 
-    Returns (word, seen, error): `word` is the verified name-cell Word or None;
-    `seen` is every list-row word encountered (for diagnostics); `error` is a
-    fatal reason (occlusion) or None."""
+    Besides the gated primary match, NEAR-MISS candidates (within edit-distance
+    tolerance but failing the roster gate) are given a second look: the roster
+    gate rejects an OCR word that fits a sibling account equally well (e.g.
+    'Piltongl' misread from 'Piltong1' is distance 1 from Piltong1/2/3 alike),
+    so the high-magnification re-OCR in _verify_row - where the garbled digit
+    usually resolves - makes the final, still-gated decision. Without this,
+    sibling sets whose distinguishing digit misreads would be "not found".
+
+    Returns (word, img, seen, error): `word` is the verified name-cell Word or
+    None; `img` is the capture it was found in; `seen` is every list-row word
+    encountered (diagnostics); `error` is a fatal reason (occlusion) or None."""
+    t = _fold(name)
+    tol = _tol(len(t))
     win.scroll_to_top(a.list_scroll)
     last_keys = None
     seen = set()
@@ -593,16 +651,32 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
         img = win.capture()
         words, _lines = ocr_image(img, scale=m.ocr_scale)
         if not _has_anchors(words):
-            return None, seen, "window occluded (no ROKBot anchors visible)"
+            return None, None, seen, "window occluded (no ROKBot anchors visible)"
         for w in words:
-            if w.cy <= a.list_y_max and len(w.text) >= 2:
-                seen.add(w.text)
+            if w.cy <= a.list_y_max and sum(c.isalpha() for c in w.text) >= 3:
+                seen.add(w.text)   # >=3 letters: keep resource numbers out of diagnostics
+        # candidates, best first: the gated match, then near-misses by distance
+        cands: List[Word] = []
         nm = _find_name(words, name, m, a, roster)
         if nm is not None:
-            if _verify_row(img, nm, name, m, roster):
-                return nm, seen, None
-            print(f"[READER] '{nm.text}' matched '{name}' but FAILED high-scale "
-                  f"verification - not clicking; continuing search")
+            cands.append(nm)
+        near = []
+        for w in words:
+            if (w is not nm and w.cy <= a.list_y_max and w.cx < m.name_max_x
+                    and any(c.isalpha() for c in w.text)):
+                wt = _fold(w.text)
+                if wt and abs(len(wt) - len(t)) <= tol:
+                    d = _edit_dist(t, wt)
+                    if d <= tol:
+                        near.append((d, w.cy, w))
+        near.sort(key=lambda x: (x[0], x[1]))
+        cands.extend(w for _d, _cy, w in near[:3])
+        for cand in cands:
+            if _verify_row(img, cand, name, m, roster):
+                return cand, img, seen, None
+        if cands:
+            print(f"[READER] {len(cands)} candidate(s) for '{name}' on this page "
+                  f"failed high-scale verification - not clicking; continuing")
         keys = frozenset(_norm(w.text) for w in words
                          if w.cy <= a.list_y_max and w.cx < m.name_max_x
                          and any(c.isalpha() for c in w.text))
@@ -610,7 +684,7 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
             break            # view didn't change after scrolling -> bottom reached
         last_keys = keys
         win.scroll(*a.list_scroll, -2)   # page down ~2-4 rows (overlap, no skip)
-    return None, seen, None
+    return None, None, seen, None
 
 
 def _find_log_tab(words: List[Word], m: Metrics) -> Optional[Tuple[int, int]]:
@@ -710,7 +784,7 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
 
         # 1) select the account: page from the top until the row is found AND
         #    verified, then click its NAME cell (selects the account).
-        nm, seen, err = _locate_row(win, name, m, anch, roster)
+        nm, img, seen, err = _locate_row(win, name, m, anch, roster)
         if err:
             return LogReading(name, False, error=err)
         if nm is None:
@@ -720,6 +794,15 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
                 pass
             return LogReading(name, False,
                               error=_not_found_error(name, seen) + " (png saved)")
+        # The GUI checkbox is the truth about whether this instance is running.
+        # If it's unticked, the state file that sent us here is out of sync -
+        # report running=False and DON'T select/read (its log is naturally
+        # stale and would only produce false freeze alerts).
+        running = _checkbox_state(img, nm.cy, m)
+        if running is False:
+            return LogReading(name, False, running=False,
+                              error="instance is NOT running (checkbox unticked) - "
+                                    "state file out of sync with GUI")
         win.click_client(nm.cx, nm.cy)
         time.sleep(0.4)
 
@@ -741,7 +824,8 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
         recent = log_lines[-6:]
         bad = sorted({s for s in BAD_STATES
                       if any(s in l.lower() for l in recent)})
-        return LogReading(name, True, latest_ts=latest, lines=log_lines, bad_states=bad)
+        return LogReading(name, True, latest_ts=latest, lines=log_lines,
+                          bad_states=bad, running=running)
     finally:
         # Drop the temporary topmost bit (window size/pos were never touched)
         # and restore this thread's DPI context (pool threads are reused).
@@ -755,7 +839,8 @@ def read_account_log(name: str, win: Optional[ROKWindow] = None,
 
 def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
                            win: Optional[ROKWindow] = None,
-                           dry_run: bool = False) -> dict:
+                           dry_run: bool = False,
+                           ensure: Optional[str] = None) -> dict:
     """Locate an account row by NAME and click its start/stop checkbox.
 
     This is the name-anchored replacement for the old fixed-coordinate
@@ -767,15 +852,22 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
     only then clicked - if the name can't be found and verified, we return an
     error and click NOTHING.
 
-    Returns {'success', 'error', 'matched_text', 'clicked_at'}. With
-    dry_run=True everything runs except the click (for safe live testing).
+    `ensure` ('checked' for start, 'unchecked' for stop) makes the toggle
+    direction-safe: if the checkbox already shows the desired end state (the
+    state file was out of sync with the GUI), we DON'T click - a blind toggle
+    would flip a running instance off / a stopped one on. After a real click
+    the checkbox is re-read to confirm it reached the desired state.
+
+    Returns {'success', 'error', 'matched_text', 'clicked_at', 'noop',
+    'checkbox'}. With dry_run=True everything runs except the click.
     """
+    res = {"success": False, "error": None, "matched_text": None,
+           "clicked_at": None, "noop": False, "checkbox": None}
     prev_dpi = set_thread_dpi_aware()
     win = win or ROKWindow()
     if not win.find():
         restore_thread_dpi(prev_dpi)
-        return {"success": False, "error": "ROKBot window not found",
-                "matched_text": None, "clicked_at": None}
+        return {**res, "error": "ROKBot window not found"}
     prepared = False
     try:
         win.prepare()
@@ -783,26 +875,41 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
         m = win.m
         anch, err = _prepare_window(win)
         if err:
-            return {"success": False, "error": err,
-                    "matched_text": None, "clicked_at": None}
-        nm, seen, err = _locate_row(win, name, m, anch, roster)
+            return {**res, "error": err}
+        nm, img, seen, err = _locate_row(win, name, m, anch, roster)
         if err:
-            return {"success": False, "error": err,
-                    "matched_text": None, "clicked_at": None}
+            return {**res, "error": err}
         if nm is None:
             try:
                 win.capture().save(rf"C:\Users\binlo\rok_notfound_{name}.png")
             except Exception:
                 pass
-            return {"success": False,
-                    "error": _not_found_error(name, seen) + " (png saved)",
-                    "matched_text": None, "clicked_at": None}
+            return {**res, "error": _not_found_error(name, seen) + " (png saved)"}
+        res["matched_text"] = nm.text
+        cur = _checkbox_state(img, nm.cy, m)
+        res["checkbox"] = cur
         cb = (round(BASE_CHECKBOX_X * m.scale), nm.cy)
-        if not dry_run:
-            win.click_client(*cb)
-            time.sleep(0.3)
-        return {"success": True, "error": None,
-                "matched_text": nm.text, "clicked_at": cb}
+        if ensure == "checked" and cur is True:
+            return {**res, "success": True, "noop": True,
+                    "error": None}   # already running per GUI - clicking would STOP it
+        if ensure == "unchecked" and cur is False:
+            return {**res, "success": True, "noop": True,
+                    "error": None}   # already stopped per GUI - clicking would START it
+        if dry_run:
+            return {**res, "success": True, "clicked_at": cb}
+        win.click_client(*cb)
+        time.sleep(0.5)
+        res["clicked_at"] = cb
+        # Post-click confirmation: the checkbox must now show the desired state.
+        if ensure in ("checked", "unchecked"):
+            after = _checkbox_state(win.capture(), nm.cy, m)
+            res["checkbox"] = after
+            want = (ensure == "checked")
+            if after is not None and after != want:
+                return {**res, "error": f"clicked, but checkbox reads "
+                        f"{'ticked' if after else 'unticked'} instead of "
+                        f"{'ticked' if want else 'unticked'} - inspect the GUI"}
+        return {**res, "success": True}
     finally:
         if prepared:
             try:
@@ -839,9 +946,11 @@ if __name__ == "__main__":
             print(f"(roster unavailable: {e} — matching without roster gate)")
         print(f"roster ({len(roster)}): {roster}")
         res = click_account_checkbox(args.locate, roster=roster, dry_run=True)
+        cb = res.get("checkbox")
         print(f"success     : {res['success']}")
         print(f"matched_text: {res['matched_text']}")
         print(f"would click : {res['clicked_at']}")
+        print(f"checkbox    : {cb} ({'RUNNING' if cb else 'NOT running' if cb is False else 'unknown'})")
         print(f"error       : {res['error']}")
         raise SystemExit(0 if res["success"] else 1)
 

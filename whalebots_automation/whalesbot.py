@@ -389,22 +389,25 @@ class WhaleBots:
         # coordinates - if the row can't be found and verified, this raises
         # instead of toggling the wrong account.
         try:
-            result = self._click_account_row(emulator_state.emulator_info.name)
+            result = self._click_account_row(emulator_state.emulator_info.name,
+                                             ensure="checked")
             if not result.get("success"):
                 raise WindowError(result.get("error") or "row not located")
 
-            # Update state
+            # Update state (also on noop: GUI already showed it running, so
+            # this syncs the drifted state file to GUI truth)
             self.state_manager.set_emulator_active(index)
 
             self.logger.info(
                 f"Started emulator at index {index} "
-                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')})"
+                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')}"
+                f"{', noop: already ticked' if result.get('noop') else ''})"
             )
 
         except Exception as e:
             raise WindowError(f"Failed to start emulator at index {index}: {e}")
 
-    def _click_account_row(self, name: str) -> dict:
+    def _click_account_row(self, name: str, ensure: str) -> dict:
         """Click the start/stop checkbox of the account named `name`,
         locating the row by OCR instead of fixed coordinates.
 
@@ -413,6 +416,11 @@ class WhaleBots:
         KatFruit89): a row is only accepted when it matches the target
         STRICTLY better than any other real account, and it is re-verified at
         high magnification before the click.
+
+        `ensure` is 'checked' (start) or 'unchecked' (stop): if the GUI
+        checkbox already shows that state, no click happens (result has
+        noop=True) - a blind toggle would flip the instance the wrong way when
+        the state file has drifted from the GUI.
         """
         try:
             from .services.watchdog_reader import click_account_checkbox
@@ -421,7 +429,7 @@ class WhaleBots:
 
         roster = [s.emulator_info.name for s in self.state_manager.get_emulator_states()
                   if s.emulator_info.name]
-        return click_account_checkbox(name, roster=roster)
+        return click_account_checkbox(name, roster=roster, ensure=ensure)
 
     @log_performance()
     def start(self, device: Union[str, int]) -> None:
@@ -493,16 +501,19 @@ class WhaleBots:
         # Name-anchored click (see _start_by_index): the checkbox toggles, so
         # start and stop click the same located spot.
         try:
-            result = self._click_account_row(emulator_state.emulator_info.name)
+            result = self._click_account_row(emulator_state.emulator_info.name,
+                                             ensure="unchecked")
             if not result.get("success"):
                 raise WindowError(result.get("error") or "row not located")
 
-            # Update state
+            # Update state (also on noop: GUI already showed it stopped, so
+            # this syncs the drifted state file to GUI truth)
             self.state_manager.set_emulator_inactive(index)
 
             self.logger.info(
                 f"Stopped emulator at index {index} "
-                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')})"
+                f"(matched '{result.get('matched_text')}' at {result.get('clicked_at')}"
+                f"{', noop: already unticked' if result.get('noop') else ''})"
             )
 
         except Exception as e:

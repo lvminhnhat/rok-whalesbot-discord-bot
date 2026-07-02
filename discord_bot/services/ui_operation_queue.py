@@ -132,7 +132,7 @@ class UIOperationQueue:
                 return int(os.getenv(name, str(default)))
             except ValueError:
                 return default
-        self._idle_min = _env_int("UI_PAUSE_IDLE_SECONDS", 30)
+        self._idle_min = _env_int("UI_PAUSE_IDLE_SECONDS", 10)
         self._idle_recheck = max(1, _env_int("UI_IDLE_RECHECK_SECONDS", 10))
         self._idle_max_wait = _env_int("UI_IDLE_MAX_WAIT_SECONDS", 900)
 

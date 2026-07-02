@@ -72,6 +72,28 @@ def _ts_key(ts: Optional[str]):
         return None
 
 
+def _log_age_seconds(ts: Optional[str], now: float) -> Optional[float]:
+    """Age of an in-game "HH:MM:SS" log timestamp vs LOCAL wall-clock, or None
+    if unparsable.
+
+    The log clock matches local time, so the timestamp's own age flags a
+    frozen instance IMMEDIATELY - the last_change-based tracking below only
+    detects staleness that develops while the bot is running, so right after
+    a restart an instance that froze an hour ago would look fresh for another
+    STALE_SECONDS. Midnight wrap is handled modulo 24h; a timestamp slightly
+    AHEAD of the clock (skew) maps to ~24h, which we clamp to fresh."""
+    k = _ts_key(ts)
+    if k is None:
+        return None
+    lt = time.localtime(now)
+    now_sod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+    ts_sod = k[0] * 3600 + k[1] * 60 + k[2]
+    age = (now_sod - ts_sod) % 86400
+    if age > 86400 - 600:   # "in the future" by <10 min = clock skew -> fresh
+        return 0.0
+    return float(age)
+
+
 class WatchdogService:
     def __init__(self, now_fn: Callable[[], float] = time.time):
         self.states: Dict[str, AccountState] = {}
@@ -112,6 +134,13 @@ class WatchdogService:
     def _update(self, st: AccountState, r: LogReading) -> Optional[WatchEvent]:
         now = self._now()
 
+        # GUI checkbox says the instance is not running at all: nothing to
+        # watch (the caller syncs the drifted state file); forget its history
+        # so a later start begins with a clean slate.
+        if getattr(r, "running", None) is False:
+            self.reset(st.name)
+            return None
+
         if not r.ok:
             st.consecutive_fail += 1
             # Transient read failures don't flip freeze state; surface once if persistent.
@@ -129,7 +158,13 @@ class WatchdogService:
             st.last_ts = r.latest_ts
             st.last_change = now
 
+        # Staleness is the WORSE of two signals: how long WE have watched the
+        # timestamp not advance, and how old the log timestamp itself is (the
+        # latter catches instances that froze before the bot (re)started).
         stale = now - st.last_change
+        log_age = _log_age_seconds(r.latest_ts, now)
+        if log_age is not None:
+            stale = max(stale, log_age)
         st.consecutive_bad = (st.consecutive_bad + 1) if r.bad_states else 0
 
         reason = ""

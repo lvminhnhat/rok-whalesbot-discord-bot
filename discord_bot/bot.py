@@ -485,6 +485,20 @@ class WhaleBotDiscord(discord.Bot):
                 reading = await self._queued_read(emu["index"], emu["name"], roster)
                 print(f"[WATCHDOG]   {emu['name']} (idx {emu['index']}): "
                       f"ok={reading.ok} ts={reading.latest_ts} err={reading.error}")
+                if getattr(reading, "running", None) is False:
+                    # GUI checkbox says this instance is NOT running - the
+                    # state file that listed it as active has drifted. Sync it
+                    # so it stops being swept, and don't alert.
+                    print(f"[WATCHDOG]   {emu['name']}: unticked in GUI though state "
+                          f"file says active - syncing state file, skipping")
+                    try:
+                        await asyncio.to_thread(
+                            self.bot_service.whalesbot.state_manager.set_emulator_inactive,
+                            emu["index"])
+                    except Exception as e:
+                        print(f"[WATCHDOG]   state sync failed: {e}")
+                    self.watchdog_service.reset(emu["name"])
+                    continue
                 ev = self.watchdog_service.process_reading(emu["name"], reading)
                 if ev:
                     print(f"[WATCHDOG] {ev.kind}: {ev.name} — {ev.reason}")

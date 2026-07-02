@@ -359,6 +359,27 @@ def ocr_image(img, scale: int = 2) -> Tuple[List[Word], List[dict]]:
 # --------------------------------------------------------------------------
 # ROKBot window control
 # --------------------------------------------------------------------------
+def _has_yes_no_buttons(hwnd) -> bool:
+    """True if the window has standard Yes/No Button children - the signature
+    of ROKBot's terminate-confirm dialog (the main window is custom-drawn and
+    has no such controls)."""
+    found = []
+
+    def kids(c, _):
+        try:
+            if win32gui.GetClassName(c) == "Button":
+                t = win32gui.GetWindowText(c).strip().lower()
+                if t in ("yes", "no"):
+                    found.append(t)
+        except Exception:
+            pass
+    try:
+        win32gui.EnumChildWindows(hwnd, kids, None)
+    except Exception:
+        return False
+    return "yes" in found and "no" in found
+
+
 class ROKWindow:
     def __init__(self):
         self.hwnd = None
@@ -369,11 +390,27 @@ class ROKWindow:
         res = []
 
         def cb(h, _):
-            if win32gui.IsWindowVisible(h) and TITLE_SUBSTR in win32gui.GetWindowText(h):
-                res.append(h)
+            if not win32gui.IsWindowVisible(h):
+                return
+            if TITLE_SUBSTR not in win32gui.GetWindowText(h):
+                return
+            # Exclude ROKBot's own confirm dialog ("Do you want to terminate
+            # this emulator?"): its title is EXACTLY "Rise of Kingdoms Bot" (a
+            # substring of the main window's "...Bot 1.1.2.3"), and BOTH are
+            # class #32770 - so class can't tell them apart. The dialog is
+            # identified by its standard Yes/No Button children (the main
+            # window is custom-drawn and has none). Without this, a naive match
+            # could attach to the dialog and then see no list anchors.
+            if _has_yes_no_buttons(h):
+                return
+            res.append(h)
 
         win32gui.EnumWindows(cb, None)
-        self.hwnd = res[0] if res else None
+        # Prefer the largest match (the main app), never a small popup.
+        def _area(h):
+            l, t, r, b = win32gui.GetWindowRect(h)
+            return (r - l) * (b - t)
+        self.hwnd = max(res, key=_area) if res else None
         return self.hwnd is not None
 
     def prepare(self) -> None:
@@ -909,6 +946,198 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
                 return {**res, "error": f"clicked, but checkbox reads "
                         f"{'ticked' if after else 'unticked'} instead of "
                         f"{'ticked' if want else 'unticked'} - inspect the GUI"}
+        return {**res, "success": True}
+    finally:
+        if prepared:
+            try:
+                win.restore_placement()
+            except Exception:
+                pass
+        restore_thread_dpi(prev_dpi)
+
+
+def _send_escape() -> None:
+    win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
+    time.sleep(0.05)
+    win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
+    time.sleep(0.3)
+
+
+def _find_confirm_dialog():
+    """The ROKBot 'Do you want to terminate this emulator?' confirm: a standard
+    Win32 #32770 dialog titled exactly 'Rise of Kingdoms Bot'. Returns its hwnd
+    or None."""
+    hits = []
+
+    def cb(h, _):
+        try:
+            if (win32gui.IsWindowVisible(h)
+                    and win32gui.GetClassName(h) == "#32770"
+                    and win32gui.GetWindowText(h) == TITLE_SUBSTR):
+                hits.append(h)
+        except Exception:
+            pass
+    win32gui.EnumWindows(cb, None)
+    return hits[0] if hits else None
+
+
+def _click_dialog_button(dlg, want: str) -> bool:
+    """Click a button on a #32770 dialog by its EXACT window text (e.g. 'Yes').
+
+    The confirm dialog uses REAL Win32 Button controls, so we match on control
+    text - no OCR, no fuzzy - and click the control's own rect center. Returns
+    True if the button was found and clicked."""
+    target = want.strip().lower()
+    found = []
+
+    def kids(c, _):
+        try:
+            if (win32gui.GetClassName(c) == "Button"
+                    and win32gui.GetWindowText(c).strip().lower() == target):
+                found.append(c)
+        except Exception:
+            pass
+    win32gui.EnumChildWindows(dlg, kids, None)
+    if not found:
+        return False
+    l, t, r, b = win32gui.GetWindowRect(found[0])
+    cx, cy = (l + r) // 2, (t + b) // 2
+    try:
+        win32gui.SetForegroundWindow(dlg)
+    except Exception:
+        pass
+    time.sleep(0.2)
+    win32api.SetCursorPos((cx, cy))
+    time.sleep(0.12)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.06)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.5)
+    return True
+
+
+def _confirm_terminate(timeout: float = 6.0) -> Optional[bool]:
+    """Answer the terminate-emulator confirm dialog with 'Yes', waiting up to
+    `timeout` for it to appear (it pops shortly after the Close click).
+
+    Returns True if we clicked Yes, False if the dialog appeared but the Yes
+    button wasn't found (we leave it alone for a human), None if no dialog
+    appeared at all within the timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dlg = _find_confirm_dialog()
+        if dlg is not None:
+            return _click_dialog_button(dlg, "Yes")
+        time.sleep(0.3)
+    return None
+
+
+def close_account_via_menu(name: str, roster: Optional[List[str]] = None,
+                           win: Optional[ROKWindow] = None,
+                           verify_timeout: float = 45.0) -> dict:
+    """Close an account's emulator via its right-click context menu.
+
+    Flow: locate the row (verified name-anchored), left-click to select it,
+    right-click the same spot -> menu opens down-right of the cursor -> click
+    the 'Close' item.
+
+    MENU SAFETY RULES (stricter than row matching - the menu also contains
+    'Remove', which DELETES the account's config):
+      * menu items are matched by EXACT text only - no fuzzy, no folding;
+      * the menu must be PROVEN before anything is clicked: 'Start/stop' and
+        'Remove' must both be visible in the expected geometry below-right of
+        the click, and exactly ONE 'Close' must sit between them;
+      * any doubt -> press Esc to dismiss and abort. Nothing unverified is
+        ever clicked while a menu is open.
+
+    After clicking Close, polls the row's checkbox until it reads unticked
+    (the emulator takes a while to shut down) up to `verify_timeout` seconds.
+
+    Returns {'success', 'error', 'warning', 'matched_text', 'closed_confirmed'}:
+    success = the verified Close item was clicked; closed_confirmed = the
+    checkbox was seen unticking afterward (warning set if it wasn't).
+    """
+    res = {"success": False, "error": None, "warning": None,
+           "matched_text": None, "closed_confirmed": False}
+    prev_dpi = set_thread_dpi_aware()
+    win = win or ROKWindow()
+    if not win.find():
+        restore_thread_dpi(prev_dpi)
+        return {**res, "error": "ROKBot window not found"}
+    prepared = False
+    try:
+        win.prepare()
+        prepared = True
+        m = win.m
+        anch, err = _prepare_window(win)
+        if err:
+            return {**res, "error": err}
+        nm, img, seen, err = _locate_row(win, name, m, anch, roster)
+        if err:
+            return {**res, "error": err}
+        if nm is None:
+            return {**res, "error": _not_found_error(name, seen)}
+        res["matched_text"] = nm.text
+
+        # select the row, then right-click the same spot to open the menu
+        win.click_client(nm.cx, nm.cy)
+        time.sleep(0.5)
+        sx, sy = win32gui.ClientToScreen(win.hwnd, (int(nm.cx), int(nm.cy)))
+        win32api.SetCursorPos((sx, sy))
+        time.sleep(0.15)
+        win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        time.sleep(0.08)
+        win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+        time.sleep(0.6)
+
+        words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
+        # menu region: below-right of the click point (measured ~175x210 @125%)
+        rx0, rx1 = nm.cx - round(8 * m.scale), nm.cx + round(200 * m.scale)
+        ry0, ry1 = nm.cy, nm.cy + round(230 * m.scale)
+        menu = [w for w in words if rx0 <= w.cx <= rx1 and ry0 <= w.cy <= ry1]
+        startstop = [w for w in menu if w.text == "Start/stop"]
+        remove_ = [w for w in menu if w.text == "Remove"]
+        close_ = [w for w in menu if w.text == "Close"]
+        if not (startstop and remove_ and len(close_) == 1
+                and startstop[0].cy < close_[0].cy < remove_[0].cy):
+            _send_escape()
+            got = ", ".join(sorted({w.text for w in menu})[:15])
+            return {**res, "error": "context menu not verified (need exactly one "
+                    f"'Close' between 'Start/stop' and 'Remove'); saw: {got}"}
+
+        win.click_client(close_[0].cx, close_[0].cy)
+        time.sleep(0.5)
+
+        # 'Close' pops a standard confirm dialog ("Do you want to terminate
+        # this emulator?"); answer Yes. This dialog is a separate top-level
+        # window, so drop our temporary topmost first (it can sit over the
+        # dialog) and re-assert it after.
+        try:
+            win.release_topmost()
+        except Exception:
+            pass
+        confirmed = _confirm_terminate(timeout=8.0)
+        if confirmed is None:
+            return {**res, "error": "clicked Close but the terminate-confirm "
+                    "dialog never appeared - aborting (nothing terminated?)"}
+        if confirmed is False:
+            _send_escape()   # dialog present but Yes not found - dismiss, don't guess
+            return {**res, "error": "terminate-confirm dialog appeared but its "
+                    "'Yes' button was not found - dismissed without terminating"}
+
+        # confirm: the row's checkbox should untick as the emulator shuts down
+        deadline = time.time() + verify_timeout
+        while time.time() < deadline:
+            time.sleep(5.0)
+            nm2, img2, _seen2, err2 = _locate_row(win, name, m, anch, roster)
+            if err2 or nm2 is None:
+                continue
+            if _checkbox_state(img2, nm2.cy, m) is False:
+                res["closed_confirmed"] = True
+                break
+        if not res["closed_confirmed"]:
+            res["warning"] = ("Close clicked, but checkbox still reads ticked "
+                              f"after {int(verify_timeout)}s - verify manually")
         return {**res, "success": True}
     finally:
         if prepared:

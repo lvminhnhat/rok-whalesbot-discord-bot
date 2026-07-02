@@ -443,20 +443,33 @@ class SecureFileHandler:
         if create_backup and os.path.exists(file_path):
             self.backup_manager.create_backup(file_path)
 
+        # Unique temp name per writer: a fixed '<file>.tmp' collides when two
+        # threads/processes write the same file at once (the WhaleBots GUI also
+        # rewrites its state files), which used to surface as WinError 183
+        # "Cannot create a file when that file already exists".
+        temp_file = f"{file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             # Ensure directory exists
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
             # Write to temporary file first
-            temp_file = file_path + '.tmp'
             with open(temp_file, 'w', encoding=self.config.file_encoding) as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
-            # Atomic move to final location
-            if os.name == 'nt':  # Windows
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            os.rename(temp_file, file_path)
+            # Atomic move to final location. os.replace overwrites the target
+            # atomically (no remove-then-rename window). Retry briefly: another
+            # writer may hold the file for a moment (sharing violation).
+            last_err = None
+            for attempt in range(5):
+                try:
+                    os.replace(temp_file, file_path)
+                    last_err = None
+                    break
+                except (PermissionError, OSError) as e:
+                    last_err = e
+                    time.sleep(0.1 * (attempt + 1))
+            if last_err is not None:
+                raise last_err
 
             # Invalidate cache
             if self.cache:
@@ -467,11 +480,10 @@ class SecureFileHandler:
 
         except Exception as e:
             # Clean up temporary file if it exists
-            temp_file = file_path + '.tmp'
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
-                except:
+                except OSError:
                     pass
 
             raise FileOperationError(

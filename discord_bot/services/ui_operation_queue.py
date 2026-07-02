@@ -6,6 +6,8 @@ conflicts when multiple users try to control the GUI simultaneously.
 """
 
 import asyncio
+import ctypes
+import os
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -15,6 +17,24 @@ from typing import Dict, Any, Callable, Optional, List
 import pytz
 
 from shared.constants import InstanceStatus
+
+
+def _seconds_since_last_input() -> Optional[float]:
+    """Seconds since the last local mouse/keyboard input, or None if unavailable.
+
+    Used to hold cursor-moving operations while someone is physically using the
+    host, so GUI automation never fights the local user for the mouse."""
+    try:
+        class _LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        tick = ctypes.windll.kernel32.GetTickCount()
+        return max(0.0, (tick - info.dwTime) / 1000.0)
+    except Exception:
+        return None
 
 
 class OperationType(Enum):
@@ -101,6 +121,20 @@ class UIOperationQueue:
         self._is_processing = False
         self._processor_task = None
         self._lock = threading.Lock()
+
+        # Idle gate: hold cursor-moving operations while someone is using the
+        # machine. "In use" = local input within the last UI_PAUSE_IDLE_SECONDS
+        # (0 disables the gate); re-check every UI_IDLE_RECHECK_SECONDS; after
+        # UI_IDLE_MAX_WAIT_SECONDS of continuous use, run anyway so automation
+        # on a mostly-unattended host can never starve.
+        def _env_int(name: str, default: int) -> int:
+            try:
+                return int(os.getenv(name, str(default)))
+            except ValueError:
+                return default
+        self._idle_min = _env_int("UI_PAUSE_IDLE_SECONDS", 10)
+        self._idle_recheck = max(1, _env_int("UI_IDLE_RECHECK_SECONDS", 10))
+        self._idle_max_wait = _env_int("UI_IDLE_MAX_WAIT_SECONDS", 900)
 
         # Statistics
         self._stats = {
@@ -239,9 +273,18 @@ class UIOperationQueue:
         if not operation:
             return
 
-        # Mark as processing
+        # Mark as processing (also holds the concurrency slot while gated, so a
+        # second cursor-moving operation can't slip past the idle gate).
         with self._lock:
             operation.status = OperationStatus.PROCESSING
+            self._processing_operations[operation_id] = datetime.now(pytz.UTC)
+
+        # Hold while the machine is in use - GUI automation moves the physical
+        # cursor and must not fight a local user.
+        await self._wait_for_console_idle(operation)
+        with self._lock:
+            # The operation's timeout window starts NOW, not when it was gated
+            # (otherwise _cleanup_timed_out_operations would kill held ops).
             self._processing_operations[operation_id] = datetime.now(pytz.UTC)
 
         # Create result
@@ -312,6 +355,46 @@ class UIOperationQueue:
                 # Update statistics
                 self._update_statistics(result)
 
+    async def _wait_for_console_idle(self, operation: UIOperation) -> None:
+        """Wait until nobody has touched the local mouse/keyboard for
+        `_idle_min` seconds, re-checking every `_idle_recheck` seconds.
+
+        Sets operation.metadata['idle_gated'] while holding so callers
+        (wait_for_operation) don't count the held time against their timeout.
+        Gives up waiting after `_idle_max_wait` seconds of continuous use and
+        proceeds anyway - the host is mostly unattended and automation must not
+        starve behind a long local session.
+        """
+        if self._idle_min <= 0:
+            return
+        waited = 0.0
+        logged = False
+        while waited < self._idle_max_wait:
+            idle = _seconds_since_last_input()
+            if idle is None or idle >= self._idle_min:
+                break
+            if not logged:
+                self.logger.info(
+                    f"Operation {operation.operation_id} held - computer in use "
+                    f"(input {idle:.0f}s ago); re-checking every {self._idle_recheck}s"
+                )
+                logged = True
+            operation.metadata['idle_gated'] = True
+            await asyncio.sleep(self._idle_recheck)
+            waited += self._idle_recheck
+        else:
+            if logged:
+                self.logger.warning(
+                    f"Operation {operation.operation_id} proceeding after "
+                    f"{self._idle_max_wait}s of continuous local use"
+                )
+        if logged:
+            self.logger.info(
+                f"Operation {operation.operation_id} released after ~{waited:.0f}s "
+                f"(machine idle)"
+            )
+        operation.metadata['idle_gated'] = False
+
     async def _cleanup_timed_out_operations(self) -> None:
         """Clean up operations that have been processing too long."""
         now = datetime.now(pytz.UTC)
@@ -374,15 +457,19 @@ class UIOperationQueue:
         if timeout is None:
             timeout = operation.timeout
 
-        start_time = datetime.now(pytz.UTC)
-
-        while (datetime.now(pytz.UTC) - start_time).total_seconds() < timeout:
+        # Count only un-gated time against the timeout: while the idle gate
+        # holds the operation (machine in use), the clock is paused so callers
+        # don't report a timeout for work that hasn't been allowed to start.
+        elapsed = 0.0
+        while elapsed < timeout:
             # Check if operation is complete
             with self._lock:
                 if operation_id in self._results:
                     return self._results[operation_id]
 
             await asyncio.sleep(0.1)
+            if not operation.metadata.get('idle_gated'):
+                elapsed += 0.1
 
         return None
 

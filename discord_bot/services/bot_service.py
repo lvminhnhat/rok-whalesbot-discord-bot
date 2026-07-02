@@ -212,15 +212,14 @@ class BotService:
             )
 
             if user:
+                # DB says RUNNING but the emulator is stopped: sync the status
+                # and FALL THROUGH to start it now (previously returned "please
+                # try starting again", forcing a second manual command).
                 if user.is_running and not actual_emulator_state:
-                    print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing state...")
+                    print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing and starting...")
                     user.status = InstanceStatus.STOPPED.value
                     user.last_stop = datetime.now(pytz.UTC).isoformat()
                     self.data_manager.save_user(user)
-                    return {
-                        'success': False,
-                        'message': 'Detected state inconsistency. Your miner was stopped outside Discord. Status has been synchronized. Please try starting again.'
-                    }
 
                 if user.is_running and actual_emulator_state:
                     return {
@@ -1003,16 +1002,17 @@ class BotService:
             # Check actual emulator state before proceeding
             actual_emulator_state = self._get_actual_emulator_state(emulator_index)
 
-            # Check for state inconsistency
+            # Check for state inconsistency: database says RUNNING but the
+            # emulator is actually stopped. Sync the status and FALL THROUGH to
+            # start it in this same operation (previously this returned "please
+            # try again", forcing a second manual command for no reason).
+            sync_note = ""
             if user.is_running and not actual_emulator_state:
-                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing...")
+                print(f"[SYNC] User {user.discord_name} database says RUNNING but emulator is STOPPED. Syncing and starting...")
                 user.status = InstanceStatus.STOPPED.value
                 user.last_stop = datetime.now(pytz.UTC).isoformat()
                 self.data_manager.save_user(user)
-                return {
-                    'success': False,
-                    'message': 'State inconsistency detected. Status synchronized. Please try again.'
-                }
+                sync_note = " (state was out of sync — auto-corrected)"
 
             # Check if already running
             if user.is_running and actual_emulator_state:
@@ -1045,7 +1045,7 @@ class BotService:
 
                 return {
                     'success': True,
-                    'message': f'Bot started for {emu_label}'
+                    'message': f'Bot started for {emu_label}{sync_note}'
                 }
 
             except EmulatorAlreadyRunningError:

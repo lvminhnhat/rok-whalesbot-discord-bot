@@ -4,6 +4,7 @@ Discord bot main application.
 
 import os
 import asyncio
+import time
 from datetime import datetime, timedelta
 import pytz
 import discord
@@ -18,7 +19,9 @@ from discord_bot.services.ui_operation_queue import (
     _seconds_since_last_input,
 )
 from discord_bot.services.watchdog_service import WatchdogService, WatchEvent
-from whalebots_automation.services.watchdog_reader import read_account_log, LogReading
+from whalebots_automation.services.watchdog_reader import (
+    read_account_log, LogReading, close_account_via_menu, click_account_checkbox,
+)
 from discord_bot.utils.permissions import (
     init_permission_checker,
     get_instance_channel_ids,
@@ -32,6 +35,11 @@ from discord_bot.commands.admin_commands import setup_admin_commands
 # Freeze-watchdog tuning
 WATCHDOG_INTERVAL_MIN = 3            # how often to sweep running instances
 WATCHDOG_PAUSE_IDLE_SECONDS = 120   # skip a sweep if local input happened within this window
+
+# Auto-recovery tuning (close-via-menu + restart of a stuck instance)
+RECOVERY_ENABLED_DEFAULT = "0"      # opt-in: auto-recover on freeze (manual /recover always works)
+RECOVERY_COOLDOWN_SECONDS = 2 * 60 * 60   # min gap between recovery attempts per account
+RECOVERY_SETTLE_SECONDS = 30        # wait between close and restart
 
 
 class WhaleBotDiscord(discord.Bot):
@@ -85,10 +93,24 @@ class WhaleBotDiscord(discord.Bot):
             self.alert_channel_id = _ids[0] if _ids else None
         self.alert_mention = (os.getenv("ALERT_MENTION", "") or "").strip()
 
+        # Auto-recovery state
+        self.recovery_enabled = os.getenv("RECOVERY_ENABLED", RECOVERY_ENABLED_DEFAULT).strip().lower() not in ("0", "false", "no", "")
+        try:
+            self.recovery_cooldown = int(os.getenv("RECOVERY_COOLDOWN_SECONDS", str(RECOVERY_COOLDOWN_SECONDS)))
+        except ValueError:
+            self.recovery_cooldown = RECOVERY_COOLDOWN_SECONDS
+        try:
+            self.recovery_settle = int(os.getenv("RECOVERY_SETTLE_SECONDS", str(RECOVERY_SETTLE_SECONDS)))
+        except ValueError:
+            self.recovery_settle = RECOVERY_SETTLE_SECONDS
+        self._recovery_last: dict = {}      # name -> monotonic time of last attempt
+        self._recovery_busy: set = set()    # names currently being recovered
+
         # Setup commands
         setup_message_commands(self, self.bot_service, self.subscription_service, self.data_manager)
         setup_admin_commands(self, self.bot_service, self.subscription_service, self.data_manager)
         self._setup_watchdog_command()
+        self._setup_recover_command()
     
     def _validate_instance_channels(self, bound_channels):
         """Warn if any INSTANCE_CHANNEL ID can't be resolved to a visible channel.
@@ -423,6 +445,104 @@ class WhaleBotDiscord(discord.Bot):
         err = (res.error if res else "no result") or f"op status {getattr(res, 'status', None)}"
         return LogReading(name, False, error=err)
 
+    async def _recover_account(self, name: str, index: int, roster=None,
+                               manual: bool = False) -> dict:
+        """Close a stuck instance via its right-click menu, wait, and restart it.
+
+        Both GUI actions go through the UI queue (NORMAL priority) so they
+        serialize with reads/start/stop and the idle gate protects the mouse.
+        Guarded by a per-account cooldown and an in-flight lock so a freeze that
+        persists across sweeps can't spawn overlapping recovery loops.
+
+        Returns {'success', 'stage', 'message'}.
+        """
+        if name in self._recovery_busy:
+            return {"success": False, "stage": "busy",
+                    "message": f"recovery of {name} already in progress"}
+        now = time.monotonic()
+        last = self._recovery_last.get(name)
+        if not manual and last is not None and (now - last) < self.recovery_cooldown:
+            mins = int((self.recovery_cooldown - (now - last)) // 60)
+            return {"success": False, "stage": "cooldown",
+                    "message": f"{name} was recovered recently; cooldown ~{mins} min left"}
+
+        self._recovery_busy.add(name)
+        self._recovery_last[name] = now
+        try:
+            # 1) close via context menu (verified Close, auto-confirm terminate)
+            async def _close_cb():
+                return await asyncio.to_thread(close_account_via_menu, name, roster)
+            op_id = await self.operation_queue.add_operation(
+                operation_type=OperationType.RESTART, user_id="recovery",
+                user_name="recovery", emulator_index=index, priority=Priority.NORMAL,
+                timeout=120, callback=_close_cb,
+                metadata={"recovery": True, "account": name, "phase": "close"})
+            res = await self.operation_queue.wait_for_operation(op_id, timeout=180)
+            close_r = res.result if (res and res.status == OperationStatus.COMPLETED) else None
+            if not (close_r and close_r.get("success")):
+                err = (close_r or {}).get("error") if close_r else (res.error if res else "no result")
+                return {"success": False, "stage": "close",
+                        "message": f"close failed: {err}"}
+
+            # 2) let the emulator shut down
+            await asyncio.sleep(self.recovery_settle)
+
+            # 3) restart via direction-safe checkbox
+            async def _start_cb():
+                return await asyncio.to_thread(click_account_checkbox, name, roster,
+                                               None, False, "checked")
+            op_id = await self.operation_queue.add_operation(
+                operation_type=OperationType.START, user_id="recovery",
+                user_name="recovery", emulator_index=index, priority=Priority.NORMAL,
+                timeout=120, callback=_start_cb,
+                metadata={"recovery": True, "account": name, "phase": "start"})
+            res = await self.operation_queue.wait_for_operation(op_id, timeout=180)
+            start_r = res.result if (res and res.status == OperationStatus.COMPLETED) else None
+            if not (start_r and start_r.get("success")):
+                err = (start_r or {}).get("error") if start_r else (res.error if res else "no result")
+                return {"success": False, "stage": "restart",
+                        "message": f"closed OK but restart failed: {err}"}
+
+            # recovery clears freeze history so the next sweep starts fresh
+            self.watchdog_service.reset(name)
+            confirmed = close_r.get("closed_confirmed")
+            return {"success": True, "stage": "done",
+                    "message": f"{name} closed{'' if confirmed else ' (close unconfirmed)'} "
+                               f"and restarted"}
+        except Exception as e:
+            return {"success": False, "stage": "exception", "message": str(e)}
+        finally:
+            self._recovery_busy.discard(name)
+
+    async def _auto_recover(self, emu, roster):
+        """Fire an auto-recovery for a frozen instance and post the outcome to
+        the alert channel (skips quietly on cooldown / already-in-progress)."""
+        r = await self._recover_account(emu["name"], emu["index"], roster=roster,
+                                        manual=False)
+        if r["stage"] in ("cooldown", "busy"):
+            print(f"[RECOVERY] {emu['name']}: {r['message']}")
+            return
+        icon = "✅" if r["success"] else "❌"
+        await self._send_recovery_alert(
+            f"{icon} **Auto-recovery** of {emu['name']}: {r['message']}",
+            success=r["success"])
+
+    async def _send_recovery_alert(self, text: str, success: bool):
+        if not self.alert_channel_id:
+            print(f"[RECOVERY] {text} (no ALERT_CHANNEL configured)")
+            return
+        channel = self.get_channel(int(self.alert_channel_id))
+        if channel is None:
+            print(f"[RECOVERY] alert channel not found — {text}")
+            return
+        embed = discord.Embed(description=text,
+                              color=0x2ECC71 if success else 0xE74C3C)
+        content = self.alert_mention if (self.alert_mention and not success) else None
+        try:
+            await channel.send(content=content, embed=embed)
+        except Exception as e:
+            print(f"[RECOVERY] failed to send alert: {e}")
+
     async def _send_watchdog_alert(self, ev):
         if not self.alert_channel_id:
             print(f"[WATCHDOG] {ev.kind} {ev.name}: {ev.reason} (no ALERT_CHANNEL configured)")
@@ -504,6 +624,11 @@ class WhaleBotDiscord(discord.Bot):
                     print(f"[WATCHDOG] {ev.kind}: {ev.name} — {ev.reason}")
                     events.append(ev)
                     await self._send_watchdog_alert(ev)
+                    # Auto-recover a newly-frozen instance (opt-in). Cooldown +
+                    # in-flight lock live in _recover_account, so a freeze that
+                    # persists across sweeps won't spawn overlapping attempts.
+                    if ev.kind == "frozen" and self.recovery_enabled:
+                        asyncio.create_task(self._auto_recover(emu, roster))
         except Exception as e:
             print(f"[ERROR] watchdog sweep: {e}")
         finally:
@@ -586,11 +711,64 @@ class WhaleBotDiscord(discord.Bot):
                 state = "enabled" if bot.watchdog_enabled else "disabled"
                 tracked = len(bot.watchdog_service.states)
                 frozen = sum(1 for s in bot.watchdog_service.states.values() if s.frozen)
+                rec = "on" if bot.recovery_enabled else "off"
                 await ctx.respond(
                     f"Freeze watchdog is **{state}**. Tracking {tracked} instance(s); "
-                    f"{frozen} currently flagged frozen.",
+                    f"{frozen} currently flagged frozen. Auto-recovery: **{rec}**.",
                     ephemeral=True,
                 )
+
+    def _setup_recover_command(self):
+        bot = self
+
+        @bot.slash_command(name="recover",
+                           description="Close a stuck instance via its menu and restart it, "
+                                       "or toggle auto-recovery")
+        async def recover(ctx: discord.ApplicationContext,
+                          account: discord.Option(str, "account name, or 'auto on' / 'auto off'")):
+            if not is_admin(ctx):
+                await ctx.respond("You don't have permission to use this.", ephemeral=True)
+                return
+            arg = (account or "").strip()
+            low = arg.lower()
+            if low in ("auto on", "auto", "on"):
+                bot.recovery_enabled = True
+                await ctx.respond("✅ Auto-recovery **enabled** — the watchdog will "
+                                  "close+restart an instance when it's flagged frozen.",
+                                  ephemeral=True)
+                return
+            if low in ("auto off", "off"):
+                bot.recovery_enabled = False
+                await ctx.respond("⏸️ Auto-recovery **disabled** — `/recover <name>` still works.",
+                                  ephemeral=True)
+                return
+
+            # manual recovery of a named account
+            running, roster = bot._running_emulators()
+            match = next((e for e in running if e["name"].lower() == low), None)
+            if match is None:
+                # allow recovering an account even if the state file says stopped
+                res = bot.bot_service.get_available_emulators()
+                allm = res.get("emulators", []) if res.get("success") else []
+                match = next((e for e in allm if e.get("name", "").lower() == low), None)
+                roster = roster or [e["name"] for e in allm if e.get("name")]
+            if match is None:
+                await ctx.respond(f"❌ No emulator named **{arg}** found.", ephemeral=True)
+                return
+
+            await ctx.respond(f"🔧 Recovering **{match['name']}** — closing via menu, "
+                              f"waiting {bot.recovery_settle}s, restarting…", ephemeral=True)
+
+            async def _do():
+                r = await bot._recover_account(match["name"], match["index"],
+                                               roster=roster, manual=True)
+                icon = "✅" if r["success"] else "❌"
+                try:
+                    await ctx.followup.send(f"{icon} Recovery of **{match['name']}**: "
+                                            f"{r['message']}", ephemeral=True)
+                except Exception as e:
+                    print(f"[RECOVERY] summary not delivered: {e} — {r}")
+            asyncio.create_task(_do())
 
     async def close(self):
         """Cleanup on bot shutdown."""

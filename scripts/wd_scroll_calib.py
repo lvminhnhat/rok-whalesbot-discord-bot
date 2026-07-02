@@ -15,12 +15,11 @@ import win32con  # noqa: E402
 import win32gui  # noqa: E402
 from whalebots_automation.services.watchdog_reader import (  # noqa: E402
     ROKWindow, ocr_image, set_thread_dpi_aware, _com_init, _com_uninit,
-    LIST_Y_MAX, LIST_SCROLL_X, LIST_SCROLL_Y,
 )
 
 
 def raw_scroll(win, delta):
-    sx, sy = win32gui.ClientToScreen(win.hwnd, (LIST_SCROLL_X, LIST_SCROLL_Y))
+    sx, sy = win32gui.ClientToScreen(win.hwnd, win.m.list_scroll)
     win32api.SetCursorPos((sx, sy))
     time.sleep(0.05)
     win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, int(delta), 0)
@@ -28,9 +27,10 @@ def raw_scroll(win, delta):
 
 
 def names(win):
-    words, _ = ocr_image(win.capture())
+    words, _ = ocr_image(win.capture(), scale=win.m.ocr_scale)
     rows = [w for w in words
-            if w.cy <= LIST_Y_MAX and w.cx < 200 and any(c.isalpha() for c in w.text)]
+            if w.cy <= win.m.list_y_max and w.cx < win.m.name_max_x
+            and any(c.isalpha() for c in w.text)]
     rows.sort(key=lambda w: w.cy)
     return [w.text for w in rows]
 

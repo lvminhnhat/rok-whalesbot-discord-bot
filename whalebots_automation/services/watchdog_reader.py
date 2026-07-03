@@ -7,9 +7,11 @@ Why OCR-by-text instead of fixed coordinates?
   dynamic - the account list auto-sizes/scrolls, so the tabs and rows move. We
   therefore CAPTURE the window, OCR it to get the *bounding boxes* of the text we
   need (account name, "ACTIVITY LOG" tab, log lines), and click those boxes.
-  Because we only ever click where we actually SEE the expected text, this also
-  guards against mis-clicks when another window occludes ROKBot (if occluded,
-  OCR won't find the target -> we skip rather than click the wrong window).
+  Captures use PrintWindow (the window's own rendered surface, validated once
+  per operation against a screen grab) so a tooltip/popup partially covering
+  ROKBot can't corrupt what we read; mis-click safety against occluders is
+  enforced separately at input time (ensure_unoccluded: WindowFromPoint must
+  resolve to ROKBot or we refuse to click/scroll).
 
 Flow for one account:
   1. find + foreground + set topmost (window size/position are NEVER changed;
@@ -40,7 +42,7 @@ import win32api
 import win32con
 import win32gui
 from ctypes import windll
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageOps
 
 try:
     import pythoncom  # pywin32 - to COM-init worker threads (winsdk OCR needs it)
@@ -155,6 +157,7 @@ class Metrics:
     name_max_x: int
     row_tol: int
     ocr_scale: int                   # OCR upscale factor for this text size
+    name_ocr_scale: int = 4          # upscale for the dedicated name-column pass
 
 
 def metrics_for(scale: float) -> Metrics:
@@ -163,11 +166,18 @@ def metrics_for(scale: float) -> Metrics:
     # resolve the [HH:MM:SS] timestamps: 2x was calibrated at 125% (=2.5x
     # effective); at 100% that same text is 20% smaller, so upscale 3x instead.
     ocr = max(2, math.ceil(2.5 / s))
+    # The NAME COLUMN gets a second, higher-magnification OCR pass (cheap - the
+    # column is only ~200px wide). Measured on the saved failure captures:
+    # effective ~3.75x is the sweet spot for name garbles (66 -> 72 exact reads
+    # vs the 2.5x full-window pass), while ~5x is WORSE (68) because LANCZOS
+    # over-smooths the strokes at high factors.
+    nocr = max(2, math.ceil(3.75 / s))
     return Metrics(
         scale=s,
         name_max_x=round(BASE_NAME_MAX_X * s),
         row_tol=max(4, round(BASE_ROW_TOL * s)),
         ocr_scale=ocr,
+        name_ocr_scale=nocr,
     )
 
 
@@ -318,6 +328,14 @@ def ocr_image(img, scale: int = 2) -> Tuple[List[Word], List[dict]]:
     pywin32 puts in STA), so we never run it on the caller's thread. The fresh
     thread also gets a hard timeout so a stuck call can't wedge anything.
     """
+    # Grayscale + autocontrast before upscaling: measured on the saved failure
+    # captures this repairs the sporadic multi-char garbles ('ouc' for Duc,
+    # 'Martel' for Mortel, "Nev.'Midas") at zero cost. Hard binarization is far
+    # WORSE for this engine (66 -> 21 exact name reads) - never threshold.
+    try:
+        img = ImageOps.autocontrast(ImageOps.grayscale(img))
+    except Exception:
+        pass
     if scale != 1:
         try:
             img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
@@ -359,6 +377,78 @@ def ocr_image(img, scale: int = 2) -> Tuple[List[Word], List[dict]]:
 # --------------------------------------------------------------------------
 # ROKBot window control
 # --------------------------------------------------------------------------
+def _grab_printwindow(hwnd, w: int, h: int):
+    """Capture the window's own rendered surface via PrintWindow
+    (PW_CLIENTONLY | PW_RENDERFULLCONTENT) - unlike a screen grab, this is
+    immune to another window / tooltip / popup partially covering ROKBot,
+    which used to corrupt whatever rows it overlapped while the anchor check
+    still passed. Returns a PIL Image at (w, h) PHYSICAL pixels, or None if
+    PrintWindow refuses.
+
+    A DPI-virtualized target (ROKBot is DPI-unaware) renders at its INTERNAL
+    96-DPI size, not the DWM-stretched size the screen shows (measured live:
+    618x616 painted into the top-left of a 772x770 bitmap, rest black). So the
+    bitmap is created at the internal size - physical / (monitor DPI / window
+    DPI) - and upscaled to physical afterwards, keeping every coordinate this
+    module computes in the same physical-pixel space as clicks."""
+    import win32ui
+    try:
+        u = windll.user32
+        u.GetDpiForWindow.restype = ctypes.c_uint
+        u.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+        wdpi = u.GetDpiForWindow(hwnd) or 96
+    except Exception:
+        wdpi = 96
+    f = _window_scale(hwnd) * 96.0 / wdpi   # 1.0 for a DPI-aware target
+    iw, ih = max(1, round(w / f)), max(1, round(h / f))
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    mfc_dc = save_dc = bmp = None
+    try:
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bmp = win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(mfc_dc, iw, ih)
+        save_dc.SelectObject(bmp)
+        if not windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3):
+            return None
+        img = Image.frombuffer("RGB", (iw, ih), bmp.GetBitmapBits(True),
+                               "raw", "BGRX", 0, 1)
+        if (iw, ih) != (w, h):
+            img = img.resize((w, h), Image.LANCZOS)
+        return img
+    finally:
+        try:
+            if bmp is not None:
+                win32gui.DeleteObject(bmp.GetHandle())
+        except Exception:
+            pass
+        for dc in (save_dc, mfc_dc):
+            try:
+                if dc is not None:
+                    dc.DeleteDC()
+            except Exception:
+                pass
+        try:
+            win32gui.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            pass
+
+
+def _images_agree(a, b, thresh: float = 16.0) -> bool:
+    """True if two captures of the same window look alike (mean abs gray
+    difference on a 64x64 thumbnail). Used once per operation to prove that
+    PrintWindow renders this window at the same size/content as the screen
+    shows it - a DPI-virtualized target can render at its INTERNAL (unscaled)
+    size, which would silently shift every OCR coordinate."""
+    try:
+        ta = ImageOps.grayscale(a).resize((64, 64), Image.BILINEAR).tobytes()
+        tb = ImageOps.grayscale(b).resize((64, 64), Image.BILINEAR).tobytes()
+        diff = sum(abs(x - y) for x, y in zip(ta, tb)) / len(ta)
+        return diff < thresh
+    except Exception:
+        return False
+
+
 def _has_yes_no_buttons(hwnd) -> bool:
     """True if the window has standard Yes/No Button children - the signature
     of ROKBot's terminate-confirm dialog (the main window is custom-drawn and
@@ -384,6 +474,7 @@ class ROKWindow:
     def __init__(self):
         self.hwnd = None
         self._was_topmost = False  # captured in prepare()
+        self._pw_ok = False        # PrintWindow validated against a screen grab
         self.m = metrics_for(1.0)  # replaced with the real monitor scale in prepare()
 
     def find(self) -> bool:
@@ -439,6 +530,21 @@ class ROKWindow:
         except Exception:
             pass
         time.sleep(0.6)
+        # Calibrate PrintWindow ONCE per operation, while the window is
+        # freshly topmost (so the screen grab is a clean reference): if the
+        # two captures agree, every capture() this operation is occlusion-
+        # immune; if not (DPI-virtualized rendering, driver quirk), stick to
+        # screen grabs - same behavior as before, never wrong coordinates.
+        self._pw_ok = False
+        try:
+            cr = win32gui.GetClientRect(self.hwnd)
+            pw = _grab_printwindow(self.hwnd, cr[2], cr[3])
+            if pw is not None:
+                l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
+                sg = ImageGrab.grab(bbox=(l, t, l + cr[2], t + cr[3]))
+                self._pw_ok = _images_agree(pw, sg)
+        except Exception:
+            self._pw_ok = False
 
     def release_topmost(self) -> None:
         win32gui.SetWindowPos(self.hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -464,12 +570,51 @@ class ROKWindow:
         self.scroll(*at, 30, settle=0.25)
 
     def capture(self):
-        l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
         cr = win32gui.GetClientRect(self.hwnd)
+        if self._pw_ok:
+            try:
+                img = _grab_printwindow(self.hwnd, cr[2], cr[3])
+            except Exception:
+                img = None
+            if img is not None:
+                return img
+        l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
         return ImageGrab.grab(bbox=(l, t, l + cr[2], t + cr[3]))
+
+    def _owns_screen_point(self, sx: int, sy: int) -> bool:
+        """True if the window under this SCREEN point is ROKBot (or a child)."""
+        try:
+            h = win32gui.WindowFromPoint((int(sx), int(sy)))
+        except Exception:
+            return True   # can't tell -> match the old (unguarded) behavior
+        if not h:
+            return True
+        if h == self.hwnd or win32gui.IsChild(self.hwnd, h):
+            return True
+        try:
+            return win32gui.GetAncestor(h, 2) == self.hwnd   # GA_ROOT
+        except Exception:
+            return False
+
+    def ensure_unoccluded(self, sx: int, sy: int) -> None:
+        """Refuse to send physical input into a point another window covers.
+
+        PrintWindow captures see THROUGH occluding windows, so 'we OCR'd the
+        name there' no longer implies 'a click there hits ROKBot' - this check
+        restores that guarantee at the exact moment of input. One re-assert of
+        topmost is tried first (something may have slid over since prepare())."""
+        if self._owns_screen_point(sx, sy):
+            return
+        win32gui.SetWindowPos(self.hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                              win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+        time.sleep(0.3)
+        if not self._owns_screen_point(sx, sy):
+            raise RuntimeError(f"another window covers ROKBot at screen point "
+                               f"({sx},{sy}) - refusing to click/scroll there")
 
     def click_client(self, cx: int, cy: int) -> None:
         sx, sy = win32gui.ClientToScreen(self.hwnd, (int(cx), int(cy)))
+        self.ensure_unoccluded(sx, sy)
         win32api.SetCursorPos((sx, sy))
         time.sleep(0.08)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -483,6 +628,7 @@ class ROKWindow:
         time (never skipping a page). `settle` is the pause before the next read.
         """
         sx, sy = win32gui.ClientToScreen(self.hwnd, (int(cx), int(cy)))
+        self.ensure_unoccluded(sx, sy)
         win32api.SetCursorPos((sx, sy))
         time.sleep(0.03)
         step = 120 if notches >= 0 else -120
@@ -727,16 +873,28 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
         words, _lines = ocr_image(img, scale=m.ocr_scale)
         if not _has_anchors(words):
             return None, None, seen, "window occluded (no ROKBot anchors visible)"
-        for w in words:
+        # Names are matched from a SECOND OCR of just the name column at higher
+        # magnification (see metrics_for): the full-window pass keeps garbling
+        # ~1 name per page at its scale, and every such garble leans on the
+        # fuzzy/verify machinery - the column is ~200px wide, so re-reading it
+        # sharper is nearly free and removes most garbles at the source.
+        try:
+            col = img.crop((0, 0, min(img.width, m.name_max_x + round(6 * m.scale)),
+                            max(1, a.list_y_max)))
+            nwords, _ = ocr_image(col, scale=m.name_ocr_scale)
+        except Exception:
+            nwords = [w for w in words
+                      if w.cy <= a.list_y_max and w.cx < m.name_max_x]
+        for w in list(words) + list(nwords):
             if w.cy <= a.list_y_max and sum(c.isalpha() for c in w.text) >= 3:
                 seen.add(w.text)   # >=3 letters: keep resource numbers out of diagnostics
         # candidates, best first: the gated match, then near-misses by distance
         cands: List[Word] = []
-        nm = _find_name(words, name, m, a, roster)
+        nm = _find_name(nwords, name, m, a, roster)
         if nm is not None:
             cands.append(nm)
         near = []
-        for w in words:
+        for w in nwords:
             if (w is not nm and w.cy <= a.list_y_max and w.cx < m.name_max_x
                     and any(c.isalpha() for c in w.text)):
                 wt = _fold(w.text)
@@ -759,7 +917,7 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
         if cands:
             print(f"[READER] {len(cands)} candidate(s) for '{name}' on this page "
                   f"failed high-scale verification - not clicking; continuing")
-        keys = frozenset(_norm(w.text) for w in words
+        keys = frozenset(_norm(w.text) for w in nwords
                          if w.cy <= a.list_y_max and w.cx < m.name_max_x
                          and any(c.isalpha() for c in w.text))
         if last_keys is not None and keys == last_keys:
@@ -811,14 +969,33 @@ def _log_lines_from_words(words: List[Word], m: Metrics, a: Anchors) -> List[str
     return out
 
 
-def _latest_ts(lines: List[str]) -> Optional[str]:
-    best = None
+def _latest_ts(lines: List[str], now: Optional[float] = None) -> Optional[str]:
+    """Newest log timestamp, midnight-aware: each timestamp is scored by its
+    age vs the local wall clock MODULO 24h and the youngest wins.
+
+    A plain numeric max is wrong for ~45 min after midnight: a still-visible
+    23:5x line beats every fresh 00:0x line, so latest_ts (and the watchdog
+    staleness built on it) sticks to yesterday until the old lines scroll out
+    of the panel -> false 'Instance frozen' alerts for every account. Mod-24h
+    age also defuses OCR-garbled hours ('[08:12:05]' misread from
+    '[00:12:05]' scores ~16h old instead of winning a max). A timestamp
+    slightly AHEAD of the clock (<10 min: skew/misread) counts as age 0,
+    matching the watchdog's own clamp."""
+    if now is None:
+        now = time.time()
+    lt = time.localtime(now)
+    now_sod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+    best = None   # (age_seconds, "HH:MM:SS")
     for ln in lines:
         for m in TS_RE.finditer(ln):
             h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            key = (h, mi, s)
-            if best is None or key > best[0]:
-                best = (key, f"{h:02d}:{mi:02d}:{s:02d}")
+            if h > 23 or mi > 59 or s > 59:
+                continue   # OCR garble, not a time
+            age = (now_sod - (h * 3600 + mi * 60 + s)) % 86400
+            if age > 86400 - 600:
+                age = 0
+            if best is None or age < best[0]:
+                best = (age, f"{h:02d}:{mi:02d}:{s:02d}")
     return best[1] if best else None
 
 
@@ -1159,6 +1336,7 @@ def close_account_via_menu(name: str, roster: Optional[List[str]] = None,
         win.click_client(nm.cx, nm.cy)
         time.sleep(0.5)
         sx, sy = win32gui.ClientToScreen(win.hwnd, (int(nm.cx), int(nm.cy)))
+        win.ensure_unoccluded(sx, sy)
         win32api.SetCursorPos((sx, sy))
         time.sleep(0.15)
         win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)

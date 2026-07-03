@@ -19,6 +19,14 @@ it is the stable progress signal, and we measure staleness against WALL-CLOCK
 sweep() returns a list of WatchEvent for the caller (bot.py) to deliver to
 Discord. Alerts are debounced: one "frozen" per episode, periodic
 "still_frozen" reminders, and a "recovered" when it resumes.
+
+A FIRST reading that crosses the freeze bar never alerts by itself: it yields
+a "confirm" event asking the caller to re-read that account immediately, and
+only a second stale reading fires "frozen". Every false alert we have traced
+came from ONE corrupted read (torn capture, garbled timestamps) being
+trusted; two independent reads minutes apart make that structurally
+near-impossible while adding ~1 min of latency instead of a full sweep
+interval. "confirm" events must never be delivered to Discord.
 """
 from __future__ import annotations
 
@@ -53,6 +61,7 @@ class AccountState:
     consecutive_bad: int = 0
     consecutive_fail: int = 0
     frozen: bool = False
+    pending_confirm: bool = False      # stale once; awaiting the confirming re-read
     last_alert: float = 0.0
     reason: str = ""
 
@@ -60,7 +69,8 @@ class AccountState:
 @dataclass
 class WatchEvent:
     name: str
-    kind: str                          # "frozen" | "still_frozen" | "recovered" | "unreadable"
+    kind: str                          # "confirm" (internal - re-read, don't deliver)
+                                       # | "frozen" | "still_frozen" | "recovered" | "unreadable"
     reason: str
     latest_ts: Optional[str] = None
     recent_lines: List[str] = field(default_factory=list)
@@ -131,6 +141,9 @@ class WatchdogService:
         events: List[WatchEvent] = []
         for name in account_names:
             ev = self.process_reading(name, read_account_log(name))
+            if ev and ev.kind == "confirm":
+                # first stale reading: decide on an immediate re-read instead
+                ev = self.process_reading(name, read_account_log(name))
             if ev:
                 events.append(ev)
         return events
@@ -181,9 +194,18 @@ class WatchdogService:
         st.reason = reason
 
         if frozen and not st.frozen:
+            if not st.pending_confirm:
+                # First reading over the bar: a single corrupted read (torn
+                # capture, garbled timestamps) can fake a stale log, so ask
+                # the caller to re-read this account NOW and decide on that.
+                st.pending_confirm = True
+                return WatchEvent(st.name, "confirm", reason, r.latest_ts, r.lines[-5:])
+            st.pending_confirm = False
             st.frozen = True
             st.last_alert = now
             return WatchEvent(st.name, "frozen", reason, r.latest_ts, r.lines[-5:])
+        if not frozen:
+            st.pending_confirm = False   # a healthy read cancels a pending confirm
         if frozen and st.frozen and (now - st.last_alert) >= self.realert_seconds:
             st.last_alert = now
             return WatchEvent(st.name, "still_frozen", reason, r.latest_ts, r.lines[-5:])

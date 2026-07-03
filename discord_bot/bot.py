@@ -642,6 +642,18 @@ class WhaleBotDiscord(discord.Bot):
                     self.watchdog_service.reset(emu["name"])
                     continue
                 ev = self.watchdog_service.process_reading(emu["name"], reading)
+                if ev and ev.kind == "confirm":
+                    # First reading over the freeze bar: never alert on ONE
+                    # read - a single corrupted capture can fake a stale log.
+                    # Re-read the same account after a short pause and let the
+                    # state machine decide on that second, independent read.
+                    print(f"[WATCHDOG]   {emu['name']}: looks frozen "
+                          f"({ev.reason}) - re-reading to confirm")
+                    await asyncio.sleep(30)
+                    reading2 = await self._queued_read(emu["index"], emu["name"], roster)
+                    print(f"[WATCHDOG]   {emu['name']} (confirm read): "
+                          f"ok={reading2.ok} ts={reading2.latest_ts} err={reading2.error}")
+                    ev = self.watchdog_service.process_reading(emu["name"], reading2)
                 if ev:
                     print(f"[WATCHDOG] {ev.kind}: {ev.name} — {ev.reason}")
                     events.append(ev)

@@ -947,25 +947,37 @@ def _has_anchors(words: List[Word]) -> bool:
 
 
 def _log_lines_from_words(words: List[Word], m: Metrics, a: Anchors) -> List[str]:
-    """Reconstruct ACTIVITY LOG lines from RIGHT-panel words only, grouped into
-    rows by y.
+    """Reconstruct ACTIVITY LOG lines from RIGHT-panel words, anchored on
+    their [HH:MM:SS] tokens.
 
-    The OCR groups text by physical row, so a single OCR line mixes the left
-    ACTIVITIES column and the right LOG column. We therefore drop everything left
-    of the log panel and rebuild each log row from the remaining words.
+    Every log line starts with a timestamp, so each timestamp word anchors one
+    line and owns all panel words from its own row down to (not including) the
+    next timestamp's row. Compared to plain y-clustering this fixes two real
+    failures: OCR bounding-box jitter merged adjacent rows into scrambled text
+    ('Claim resources [00:12:05] City-s'), and a log line WRAPPED onto a
+    second visual row lost its continuation (no timestamp of its own -> the
+    fragment row was dropped). Words left of the log panel (the ACTIVITIES
+    column, which OCR mixes onto the same physical rows) are still excluded.
     """
-    log_words = sorted((w for w in words if w.x >= a.log_min_x), key=lambda w: (w.cy, w.x))
-    rows: List[Tuple[int, List[str]]] = []
-    for w in log_words:
-        if rows and abs(w.cy - rows[-1][0]) <= m.row_tol:   # same log row
-            rows[-1][1].append(w.text)
-        else:
-            rows.append((w.cy, [w.text]))
+    log_words = [w for w in words if w.x >= a.log_min_x]
+    ts_anchors = sorted((w for w in log_words if TS_RE.search(w.text)),
+                        key=lambda w: w.cy)
     out = []
-    for _cy, texts in rows:
-        line = " ".join(texts)
-        if TS_RE.search(line):
-            out.append(line)
+    for i, anchor in enumerate(ts_anchors):
+        y0 = anchor.cy - m.row_tol
+        y1 = ts_anchors[i + 1].cy - m.row_tol if i + 1 < len(ts_anchors) else None
+        mine = [w for w in log_words
+                if w is not anchor and w.cy >= y0 and (y1 is None or w.cy < y1)]
+        # reading order inside the line: visual rows top-to-bottom, x within
+        mine.sort(key=lambda w: (w.cy, w.x))
+        rows: List[Tuple[int, List[str]]] = []
+        for w in mine:
+            if rows and abs(w.cy - rows[-1][0]) <= m.row_tol:
+                rows[-1][1].append(w.text)
+            else:
+                rows.append((w.cy, [w.text]))
+        texts = [t for _cy, ts_ in rows for t in ts_]
+        out.append(" ".join([anchor.text] + texts))
     return out
 
 

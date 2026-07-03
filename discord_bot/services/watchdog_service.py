@@ -35,7 +35,11 @@ from whalebots_automation.services.watchdog_reader import (
 
 # Default tunables (seconds). Overridable per-deployment via env (read at
 # runtime in WatchdogService.__init__, since .env loads after import).
-STALE_SECONDS = 15 * 60       # no new log timestamp for this long -> frozen
+# STALE_SECONDS at 30 min (was 15): with 20-min sweeps a single corrupted
+# read that makes the log look ~20 min old could alert on its own (the
+# Piltong1 false alert); 30 min means one misread can't clear the bar alone
+# while a real freeze is still caught on the first or second sweep after it.
+STALE_SECONDS = 30 * 60       # no new log timestamp for this long -> frozen
 BAD_STATE_SWEEPS = 3          # consecutive bad-state sweeps -> frozen (loop)
 REALERT_SECONDS = 60 * 60     # re-remind about a still-frozen instance this often
 READ_FAIL_GRACE = 4           # consecutive unreadable sweeps before we surface it

@@ -560,6 +560,20 @@ def _roster_gate(word_norm: str, d_target: int, others: List[str]) -> bool:
     return all(_edit_dist(word_norm, o) > d_target for o in others)
 
 
+def _has_close_sibling(name: str, roster: Optional[List[str]], extra: int = 1) -> bool:
+    """True if some OTHER real account name is within (tolerance + extra) fold-
+    edit-distance of the target - i.e. a near-twin like KatFruit87/89 or
+    Piltong1/2/3 that a single garbled digit could confuse it with.
+
+    Names WITHOUT a close sibling are safe to verify leniently (accept an exact
+    primary match unless the re-OCR positively points at a different account);
+    names WITH one keep the strict 'must positively re-confirm at high
+    magnification' rule so a misread digit can never pick the wrong twin."""
+    t = _fold(name)
+    tol = _tol(len(t))
+    return any(_edit_dist(t, o) <= tol + extra for o in _other_names(name, roster))
+
+
 def _find_name(words: List[Word], name: str, m: Metrics, a: Anchors,
                roster: Optional[List[str]] = None) -> Optional[Word]:
     """Find an account name in the list's name column, tolerant of OCR noise
@@ -635,13 +649,25 @@ def _checkbox_state(img, cy: int, m: Metrics) -> Optional[bool]:
 
 
 def _verify_row(img, w: Word, name: str, m: Metrics,
-                roster: Optional[List[str]] = None) -> bool:
+                roster: Optional[List[str]] = None, strict: bool = True) -> bool:
     """Confirm a matched row really shows the target name before it is acted
     on: crop just that row's name cell and re-OCR it at double magnification.
 
     Defends against one-shot OCR misreads (a digit read wrong at normal scale
-    usually resolves correctly when magnified). A verification failure means
-    "treat as not found" - callers must never click an unverified row."""
+    usually resolves correctly when magnified). Callers must never click an
+    unverified row.
+
+    Two modes:
+      strict=True  - the row is confirmed ONLY if the re-OCR positively matches
+                     the target (used for fuzzy matches and sibling families,
+                     where a garbled digit could pick the wrong twin).
+      strict=False - the row is confirmed UNLESS the re-OCR positively points at
+                     a DIFFERENT account. This is for an exact, roster-gated
+                     primary match of a name with no close sibling: the 1x read
+                     was already unambiguous, so an inconclusive high-mag re-OCR
+                     (which occasionally garbles an otherwise-clean name) must
+                     not turn a real row into "not found". Safety is preserved -
+                     contrary evidence still rejects."""
     pad = round(6 * m.scale)
     box = (0, max(0, w.y - pad),
            min(img.width, m.name_max_x + pad),
@@ -649,18 +675,30 @@ def _verify_row(img, w: Word, name: str, m: Metrics,
     try:
         words2, _lines = ocr_image(img.crop(box), scale=min(8, m.ocr_scale * 2))
     except Exception:
-        return False
+        # Re-OCR crashed: for an unambiguous exact match, don't let that block a
+        # real row; for the risky (strict) cases, treat as unverified.
+        return not strict
     t = _fold(name)
     others = _other_names(name, roster)
     tol = _tol(len(t))
+    target_ok = False
+    other_better = False
     for w2 in words2:
         wt = _fold(w2.text)
         if not wt:
             continue
         d = _edit_dist(t, wt)
         if d <= tol and _roster_gate(wt, d, others):
-            return True
-    return False
+            target_ok = True
+        elif any(_edit_dist(wt, o) < d for o in others):
+            # this re-read fits some OTHER account strictly better than the
+            # target -> positive evidence the row is that other account
+            other_better = True
+    if target_ok:
+        return True
+    if other_better:
+        return False
+    return not strict   # inconclusive: reject when strict, accept when lenient
 
 
 def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
@@ -708,8 +746,15 @@ def _locate_row(win: ROKWindow, name: str, m: Metrics, a: Anchors,
                         near.append((d, w.cy, w))
         near.sort(key=lambda x: (x[0], x[1]))
         cands.extend(w for _d, _cy, w in near[:3])
+        # An exact folded, roster-gated match of a name with no close sibling
+        # is already unambiguous - verify it leniently (accept unless the
+        # high-mag re-OCR points at a different account) so an occasional
+        # re-OCR garble can't turn a name that's plainly in the list into "not
+        # found". Fuzzy/near-miss candidates and sibling families stay strict.
+        lenient_ok = not _has_close_sibling(name, roster)
         for cand in cands:
-            if _verify_row(img, cand, name, m, roster):
+            strict = not (lenient_ok and _fold(cand.text) == t)
+            if _verify_row(img, cand, name, m, roster, strict=strict):
                 return cand, img, seen, None
         if cands:
             print(f"[READER] {len(cands)} candidate(s) for '{name}' on this page "
@@ -952,6 +997,24 @@ def click_account_checkbox(name: str, roster: Optional[List[str]] = None,
             while after != want and time.time() < deadline:
                 time.sleep(1.0)
                 after = _checkbox_state(win.capture(), nm.cy, m)
+            if after != want:
+                # The fixed-position poll didn't confirm. Toggling an instance
+                # (especially STOPPING) can re-sort or redraw the list, so nm.cy
+                # may now sit over a DIFFERENT row - the action often succeeded
+                # and only the stale coordinate lied. Re-locate the row by name
+                # (roster-gated, verified) and read it fresh before declaring
+                # failure; retry while the read is mid-transition (ambiguous).
+                for _ in range(3):
+                    nm2, img2, _seen2, err2 = _locate_row(win, name, m, anch, roster)
+                    if err2 is None and nm2 is not None:
+                        fresh = _checkbox_state(img2, nm2.cy, m)
+                        if fresh == want:
+                            after = want
+                            break
+                        if fresh is not None:   # definitively the wrong state
+                            after = fresh
+                            break
+                    time.sleep(2.0)
             res["checkbox"] = after
             if after != want:
                 shown = ("ticked" if after else "unticked" if after is False

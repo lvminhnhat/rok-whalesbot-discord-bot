@@ -581,8 +581,12 @@ class ROKWindow:
         l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
         return ImageGrab.grab(bbox=(l, t, l + cr[2], t + cr[3]))
 
-    def _owns_screen_point(self, sx: int, sy: int) -> bool:
-        """True if the window under this SCREEN point is ROKBot (or a child)."""
+    def _owns_screen_point(self, sx: int, sy: int, allow_menu: bool = False) -> bool:
+        """True if the window under this SCREEN point is ROKBot (or a child).
+
+        allow_menu=True additionally accepts a Win32 popup MENU window (class
+        #32768): a context menu we just opened is its own top-level window, so
+        clicking its (verified) items must not read as 'another window'."""
         try:
             h = win32gui.WindowFromPoint((int(sx), int(sy)))
         except Exception:
@@ -592,29 +596,40 @@ class ROKWindow:
         if h == self.hwnd or win32gui.IsChild(self.hwnd, h):
             return True
         try:
+            if allow_menu and win32gui.GetClassName(h) == "#32768":
+                return True
             return win32gui.GetAncestor(h, 2) == self.hwnd   # GA_ROOT
         except Exception:
             return False
 
-    def ensure_unoccluded(self, sx: int, sy: int) -> None:
+    def ensure_unoccluded(self, sx: int, sy: int, allow_menu: bool = False) -> None:
         """Refuse to send physical input into a point another window covers.
 
         PrintWindow captures see THROUGH occluding windows, so 'we OCR'd the
         name there' no longer implies 'a click there hits ROKBot' - this check
         restores that guarantee at the exact moment of input. One re-assert of
         topmost is tried first (something may have slid over since prepare())."""
-        if self._owns_screen_point(sx, sy):
+        if self._owns_screen_point(sx, sy, allow_menu):
             return
         win32gui.SetWindowPos(self.hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
                               win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
         time.sleep(0.3)
-        if not self._owns_screen_point(sx, sy):
+        if not self._owns_screen_point(sx, sy, allow_menu):
             raise RuntimeError(f"another window covers ROKBot at screen point "
                                f"({sx},{sy}) - refusing to click/scroll there")
 
-    def click_client(self, cx: int, cy: int) -> None:
+    def capture_screen(self):
+        """Capture the client area from the SCREEN (not PrintWindow) - the one
+        correct choice when the thing to read is an overlay ABOVE the window,
+        like the right-click context menu (its a separate popup window, so
+        PrintWindow of ROKBot sees straight through it)."""
+        cr = win32gui.GetClientRect(self.hwnd)
+        l, t = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        return ImageGrab.grab(bbox=(l, t, l + cr[2], t + cr[3]))
+
+    def click_client(self, cx: int, cy: int, allow_menu: bool = False) -> None:
         sx, sy = win32gui.ClientToScreen(self.hwnd, (int(cx), int(cy)))
-        self.ensure_unoccluded(sx, sy)
+        self.ensure_unoccluded(sx, sy, allow_menu)
         win32api.SetCursorPos((sx, sy))
         time.sleep(0.08)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -1356,22 +1371,38 @@ def close_account_via_menu(name: str, roster: Optional[List[str]] = None,
         win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
         time.sleep(0.6)
 
-        words, _lines = ocr_image(win.capture(), scale=m.ocr_scale)
-        # menu region: below-right of the click point (measured ~175x210 @125%)
+        # The context menu is its OWN top-level popup window, so it must be
+        # read from the SCREEN - PrintWindow of ROKBot sees straight through
+        # it (1.3.2 regression: OCR saw the ACTIVITIES panel behind the menu,
+        # verification failed, and a perfectly good menu was Esc'd away).
+        # Menu region: below-right of the click point (measured ~175x210 @125%).
         rx0, rx1 = nm.cx - round(8 * m.scale), nm.cx + round(200 * m.scale)
         ry0, ry1 = nm.cy, nm.cy + round(230 * m.scale)
-        menu = [w for w in words if rx0 <= w.cx <= rx1 and ry0 <= w.cy <= ry1]
-        startstop = [w for w in menu if w.text == "Start/stop"]
-        remove_ = [w for w in menu if w.text == "Remove"]
-        close_ = [w for w in menu if w.text == "Close"]
-        if not (startstop and remove_ and len(close_) == 1
-                and startstop[0].cy < close_[0].cy < remove_[0].cy):
+        menu_ok = False
+        menu = []
+        startstop = remove_ = close_ = []
+        for attempt in range(2):     # the menu can render a beat after the settle
+            if attempt:
+                time.sleep(0.5)
+            words, _lines = ocr_image(win.capture_screen(), scale=m.ocr_scale)
+            menu = [w for w in words if rx0 <= w.cx <= rx1 and ry0 <= w.cy <= ry1]
+            startstop = [w for w in menu if w.text == "Start/stop"]
+            remove_ = [w for w in menu if w.text == "Remove"]
+            close_ = [w for w in menu if w.text == "Close"]
+            menu_ok = bool(startstop and remove_ and len(close_) == 1
+                           and startstop[0].cy < close_[0].cy < remove_[0].cy)
+            if menu_ok:
+                break
+        if not menu_ok:
             _send_escape()
             got = ", ".join(sorted({w.text for w in menu})[:15])
             return {**res, "error": "context menu not verified (need exactly one "
                     f"'Close' between 'Start/stop' and 'Remove'); saw: {got}"}
 
-        win.click_client(close_[0].cx, close_[0].cy)
+        # allow_menu: the point belongs to the popup menu window (class
+        # #32768), which the occlusion guard must accept here - it is exactly
+        # the thing we verified and intend to click.
+        win.click_client(close_[0].cx, close_[0].cy, allow_menu=True)
         time.sleep(0.5)
 
         # 'Close' pops a standard confirm dialog ("Do you want to terminate
